@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const http = require('http');
 const db = require('./db');
@@ -29,8 +30,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Static files: serve dashboard (React SPA built with Vite) ---
-const dashboardDir = path.join(__dirname, '..', '..', '..', 'dashboard', 'dist');
+// --- Static files: serve dashboard ---
+// Prefer the built React SPA (packages/dashboard/dist) when it has been built,
+// otherwise fall back to the zero-build vanilla dashboard bundled inside this
+// package (packages/server/src/dashboard). The vanilla copy ships in the npm
+// package and Docker image, so the dashboard works with no extra build step.
+const reactDist = path.join(__dirname, '..', '..', '..', 'dashboard', 'dist');
+const vanillaDir = path.join(__dirname, '..', 'dashboard');
+const dashboardDir = fs.existsSync(path.join(reactDist, 'index.html')) ? reactDist : vanillaDir;
+console.log(`Serving dashboard from: ${dashboardDir}`);
 app.use('/dashboard', express.static(dashboardDir));
 app.get('/dashboard/*', (req, res) => res.sendFile(path.join(dashboardDir, 'index.html')));
 
