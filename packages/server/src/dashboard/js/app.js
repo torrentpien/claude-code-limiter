@@ -114,6 +114,10 @@
       }
       return API._fetch('/api/admin/analytics' + qs);
     },
+
+    getSubscriptionUsage: function (refresh) {
+      return API._fetch('/api/admin/subscription-usage' + (refresh ? '?refresh=1' : ''));
+    },
   };
 
   /* ================================================================
@@ -444,10 +448,16 @@
      PAGE: OVERVIEW / USERS
      ================================================================ */
   function renderOverview(container) {
-    Promise.all([API.getUsers(), API.getEvents({ limit: 30 })])
+    Promise.all([
+      API.getUsers(),
+      API.getEvents({ limit: 30 }),
+      // Never let a subscription-poll problem blank the whole overview.
+      API.getSubscriptionUsage().catch(function () { return { limits: [] }; }),
+    ])
       .then(function (results) {
         var usersData = results[0];
         var eventsData = results[1];
+        var subscription = results[2];
         state.users = usersData.users;
 
         var users = usersData.users;
@@ -482,6 +492,10 @@
         html += statCard('Paused', pausedUsers, '', 'text-yellow');
         html += statCard('Killed', killedUsers, '', 'text-red');
         html += '</div>';
+
+        // Shared subscription ceiling — above the per-user panels, because it
+        // overrides all of them.
+        html += renderSubscriptionCard(subscription);
 
         // Two column: user cards + live feed
         html += '<div class="two-col">';
@@ -534,6 +548,141 @@
     );
   }
 
+  // Tokens run to millions, so raw digits are unreadable in a stat tile.
+  function formatTokens(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function formatFull(n) {
+    return (Number(n) || 0).toLocaleString('en-US');
+  }
+
+  /**
+   * Token usage card. Monitoring only — no limit is enforced on these numbers.
+   * "Weighted" applies cache pricing (write x1.25, read x0.1); raw sums are
+   * dominated by cache reads and would badly overstate real consumption.
+   */
+  function renderTokenCard(usage) {
+    var daily = (usage.daily && usage.daily.tokens) || null;
+    var weekly = (usage.weekly && usage.weekly.tokens) || null;
+    var monthly = (usage.monthly && usage.monthly.tokens) || null;
+    var byModel = (usage.daily && usage.daily.tokensByModel) || {};
+
+    var html = '<div class="card mb-2"><div class="card-header"><h3>Token Usage</h3>';
+    html += '<span class="text-muted text-sm">監督用,未設限</span></div>';
+    html += '<div class="card-body">';
+
+    if (!daily || !daily.weighted) {
+      html += '<div class="text-muted text-sm">尚無 token 資料。舊的用量記錄不含 token;'
+           +  '這個人下次使用 Claude Code 後就會開始累積。</div>';
+      html += '</div></div>';
+      return html;
+    }
+
+    html += '<div class="stats-row">';
+    html += statCard('今日(加權)', formatTokens(daily.weighted), formatFull(daily.weighted) + ' tokens');
+    html += statCard('本週(加權)', formatTokens(weekly ? weekly.weighted : 0));
+    html += statCard('本月(加權)', formatTokens(monthly ? monthly.weighted : 0));
+    html += statCard('今日輸出', formatTokens(daily.output), '實際生成');
+    html += '</div>';
+
+    html += '<div class="table-wrap"><table>';
+    html += '<thead><tr><th>Model</th><th>Input</th><th>Output</th>'
+         +  '<th>Cache Write</th><th>Cache Read</th><th>Weighted</th></tr></thead><tbody>';
+    var models = ['fable', 'opus', 'sonnet', 'haiku', 'default'];
+    var shown = 0;
+    for (var i = 0; i < models.length; i++) {
+      var t = byModel[models[i]];
+      if (!t || !t.weighted) continue;
+      shown++;
+      html += '<tr><td>' + escapeHtml(models[i]) + '</td>'
+           +  '<td>' + formatFull(t.input) + '</td>'
+           +  '<td>' + formatFull(t.output) + '</td>'
+           +  '<td>' + formatFull(t.cache_write) + '</td>'
+           +  '<td>' + formatFull(t.cache_read) + '</td>'
+           +  '<td><strong>' + formatFull(t.weighted) + '</strong></td></tr>';
+    }
+    if (!shown) {
+      html += '<tr><td colspan="6" class="text-center text-muted">今日尚無 token 用量</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    html += '<p class="text-muted text-sm mt-1">加權 = input + output + cache write x1.25 + cache read x0.1,'
+         +  '對應各自的計費比例。原始加總會被 cache read 灌水,不代表實際消耗。</p>';
+    html += '</div></div>';
+    return html;
+  }
+
+  /**
+   * The shared Claude subscription's own ceiling.
+   *
+   * Distinct from every other panel here: this is not per-user and the limiter
+   * cannot enforce it. Everyone on this box shares one login, so if a bucket
+   * hits 100% all users are blocked at once no matter what their quota says.
+   * Percentages are all the upstream API publishes — there are no token totals.
+   */
+  function renderSubscriptionCard(data) {
+    var limits = (data && data.limits) || [];
+
+    var html = '<div class="card mb-2"><div class="card-header">';
+    html += '<h3>訂閱額度(全機共用)</h3>';
+    html += '<button class="btn btn-sm" data-action="refresh-subscription">重新整理</button>';
+    html += '</div><div class="card-body">';
+
+    if (!limits.length) {
+      html += '<div class="text-muted text-sm">尚無資料。伺服器每 5 分鐘查一次;'
+           +  '若持續空白,請看 server.log 的 [subscription-usage] 訊息。</div>';
+      return html + '</div></div>';
+    }
+
+    for (var i = 0; i < limits.length; i++) {
+      var lim = limits[i];
+      var pct = typeof lim.percent === 'number' ? lim.percent : 0;
+      // Prefer the server's own severity; fall back to the shared threshold
+      // helper so the colours match every other bar on the dashboard.
+      var cls = lim.severity === 'critical' ? 'progress-fill-danger'
+              : lim.severity === 'warning' ? 'progress-fill-warn'
+              : progressClass(pct / 100);
+      var resets = lim.resets_at ? timeUntil(lim.resets_at) : '';
+
+      html += '<div class="progress-row">';
+      html += '<div class="progress-label">';
+      html += '<span class="progress-label-name">' + escapeHtml(lim.label)
+           +  (lim.is_active ? ' · 使用中' : '') + '</span>';
+      html += '<span class="progress-label-value">' + pct + '%'
+           +  (resets ? ' · ' + escapeHtml(resets) : '') + '</span>';
+      html += '</div>';
+      html += '<div class="progress-bar"><div class="progress-fill ' + cls + '" style="width:'
+           +  Math.min(100, pct) + '%"></div></div>';
+      html += '</div>';
+    }
+
+    if (data.timestamp) {
+      html += '<p class="text-muted text-sm mt-1">更新於 ' + escapeHtml(timeAgo(data.timestamp))
+           +  '。這是訂閱本身的上限,limiter 擋不住它 —— 任何一條滿了,所有人一起被鎖。</p>';
+    }
+    if (data.error) {
+      html += '<p class="text-muted text-sm">⚠ 最後一次查詢失敗:' + escapeHtml(data.error) + '(顯示的是舊資料)</p>';
+    }
+    return html + '</div></div>';
+  }
+
+  /** "resets in 3h 20m" — reset times are absolute UTC, which reads poorly. */
+  function timeUntil(iso) {
+    var ms = new Date(iso).getTime() - Date.now();
+    if (isNaN(ms)) return '';
+    if (ms <= 0) return '即將重置';
+    var mins = Math.floor(ms / 60000);
+    var days = Math.floor(mins / 1440);
+    var hours = Math.floor((mins % 1440) / 60);
+    if (days > 0) return days + '天' + hours + '小時後重置';
+    if (hours > 0) return hours + '小時' + (mins % 60) + '分後重置';
+    return mins + '分後重置';
+  }
+
   function renderUserCard(user) {
     var limits = user.limits || [];
     var usage = user.usage || {};
@@ -548,7 +697,7 @@
     }
 
     // Per-model bars
-    var models = ['opus', 'sonnet', 'haiku'];
+    var models = ['fable', 'opus', 'sonnet', 'haiku'];
     for (var mi = 0; mi < models.length; mi++) {
       var m = models[mi];
       var mLimit = getModelLimit(limits, m);
@@ -677,6 +826,7 @@
         html += '<div class="breadcrumb"><a href="#overview">Overview</a> / <span>' + escapeHtml(user.name) + '</span></div>';
         html += '<div class="page-header"><h2>' + escapeHtml(user.name) + '</h2>';
         html += '<div class="page-header-actions">';
+        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線包</button>';
         html += '<button class="btn btn-sm" data-action="edit-limits" data-user-id="' + user.id + '">Edit Limits</button>';
         html += '<button class="btn btn-sm btn-danger" data-action="delete-user" data-user-id="' + user.id + '" data-user-name="' + escapeHtml(user.name) + '">Delete User</button>';
         html += '</div></div>';
@@ -714,10 +864,28 @@
         // Right content area
         html += '<div>';
 
+        // Connection package — everything this person needs, in one file.
+        html += '<div class="card mb-2"><div class="card-header"><h3>連線包</h3></div>';
+        html += '<div class="card-body">';
+        html += '<p class="text-muted text-sm mb-2">給 <strong>' + escapeHtml(user.name) + '</strong> 的專屬一鍵包。'
+             +  '對方解壓縮後雙擊「連線Claude.bat」即可使用,不需安裝任何東西、不需登入 Claude。'
+             +  '首次下載會自動幫他建立帳號。</p>';
+        html += '<p class="text-muted text-sm mb-2">SSH 帳號:<code>' + escapeHtml(user.slug) + '</code></p>';
+        html += '<div class="mb-2">';
+        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線包</button> ';
+        html += '<button class="btn btn-sm btn-warning" data-action="rotate-package" data-user-id="' + user.id + '" data-user-name="' + escapeHtml(user.name) + '">重新產生(換金鑰)</button>';
+        html += '</div>';
+        html += '<p class="text-muted text-sm">⚠ 檔案內含私人金鑰,等同這個人的密碼——請用私訊管道傳送,不要放公開群組。'
+             +  '「重新產生」會讓對方手上的舊檔案立即失效,金鑰外流或遺失時才用。</p>';
+        html += '</div></div>';
+
         // Per-model usage bars
         html += '<div class="card mb-2"><div class="card-header"><h3>Per-Model Usage (Daily)</h3></div>';
         html += '<div class="card-body"><div class="chart-container"><canvas id="model-bars"></canvas></div></div>';
         html += '</div>';
+
+        // Token usage (monitoring only)
+        html += renderTokenCard(usage);
 
         // Active limits
         html += '<div class="card mb-2"><div class="card-header"><h3>Active Limits</h3>';
@@ -743,10 +911,10 @@
         // Recent events
         html += '<div class="card"><div class="card-header"><h3>Recent Activity</h3></div>';
         html += '<div class="card-body-flush"><div class="table-wrap"><table>';
-        html += '<thead><tr><th>Time</th><th>Model</th><th>Credits</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Time</th><th>Model</th><th>Credits</th><th>Tokens (weighted)</th></tr></thead><tbody>';
         var events = eventsData.events || [];
         if (events.length === 0) {
-          html += '<tr><td colspan="3" class="text-center text-muted">No recent activity</td></tr>';
+          html += '<tr><td colspan="4" class="text-center text-muted">No recent activity</td></tr>';
         } else {
           for (var ei = 0; ei < events.length; ei++) {
             var ev = events[ei];
@@ -754,6 +922,13 @@
             html += '<td class="text-mono text-sm">' + timeAgo(ev.timestamp) + '</td>';
             html += '<td><span class="badge badge-model">' + escapeHtml(ev.model) + '</span></td>';
             html += '<td class="text-mono">' + ev.credit_cost + '</td>';
+            // null = recorded before token accounting existed, which is not the
+            // same as a turn that used zero.
+            html += '<td class="text-mono">'
+                 + (ev.weighted_tokens === null || ev.weighted_tokens === undefined
+                     ? '<span class="text-muted">—</span>'
+                     : formatFull(ev.weighted_tokens))
+                 + '</td>';
             html += '</tr>';
           }
         }
@@ -821,7 +996,7 @@
           var barsCanvas = document.getElementById('model-bars');
           if (barsCanvas) {
             var barData = [];
-            var models = ['opus', 'sonnet', 'haiku'];
+            var models = ['fable', 'opus', 'sonnet', 'haiku'];
             for (var b = 0; b < models.length; b++) {
               var mdl = models[b];
               var used = dailyUsage[mdl] || 0;
@@ -912,8 +1087,8 @@
   }
 
   function renderSettingsInner(container) {
-    var team = state.team || { name: 'Team', credit_weights: { opus: 10, sonnet: 3, haiku: 1 } };
-    var cw = team.credit_weights || { opus: 10, sonnet: 3, haiku: 1 };
+    var team = state.team || { name: 'Team', credit_weights: { opus: 10, sonnet: 3, haiku: 1, fable: 20 } };
+    var cw = team.credit_weights || { opus: 10, sonnet: 3, haiku: 1, fable: 20 };
 
     var html = '';
     html += '<div class="page-header"><h2>Settings</h2></div>';
@@ -935,7 +1110,7 @@
     html += '<h3>Credit Weights</h3>';
     html += '<p class="text-muted text-sm mb-2">Define how many credits each model costs per turn. Higher weight = more expensive.</p>';
     html += '<div class="weight-grid">';
-    var models = ['opus', 'sonnet', 'haiku'];
+    var models = ['fable', 'opus', 'sonnet', 'haiku'];
     for (var i = 0; i < models.length; i++) {
       var m = models[i];
       html += '<div class="weight-card">';
@@ -1150,13 +1325,15 @@
     html += '<button class="preset-btn" data-preset="custom">Custom</button>';
     html += '</div>';
 
-    html += '<div id="preset-description" class="text-muted text-sm mb-2">50 credits/day. Opus: 3, Sonnet: 10, Haiku: 30.</div>';
+    html += '<div id="preset-description" class="text-muted text-sm mb-2">50 credits/day. Fable: 2, Opus: 3, Sonnet: 10, Haiku: 30.</div>';
 
     // Custom limits form (hidden by default)
     html += '<div id="custom-limits-form" class="hidden">';
     html += '<div class="form-group"><label>Credit Budget (daily)</label>';
     html += '<input type="number" id="custom-credits" min="-1" value="100" placeholder="-1 for unlimited"></div>';
     html += '<div class="form-row-3">';
+    html += '<div class="form-group"><label>Fable (daily)</label>';
+    html += '<input type="number" id="custom-fable" min="-1" value="3"></div>';
     html += '<div class="form-group"><label>Opus (daily)</label>';
     html += '<input type="number" id="custom-opus" min="-1" value="5"></div>';
     html += '<div class="form-group"><label>Sonnet (daily)</label>';
@@ -1185,10 +1362,10 @@
   }
 
   var PRESETS = {
-    light:     { credits: 50,  opus: 3,  sonnet: 10, haiku: 30, desc: '50 credits/day. Opus: 3, Sonnet: 10, Haiku: 30.' },
-    medium:    { credits: 100, opus: 5,  sonnet: 20, haiku: 50, desc: '100 credits/day. Opus: 5, Sonnet: 20, Haiku: 50.' },
-    heavy:     { credits: 200, opus: 10, sonnet: 40, haiku: 100, desc: '200 credits/day. Opus: 10, Sonnet: 40, Haiku: 100.' },
-    unlimited: { credits: -1,  opus: -1, sonnet: -1, haiku: -1, desc: 'No limits. User has full unrestricted access.' },
+    light:     { credits: 50,  fable: 2, opus: 3,  sonnet: 10, haiku: 30,  desc: '50 credits/day. Fable: 2, Opus: 3, Sonnet: 10, Haiku: 30.' },
+    medium:    { credits: 100, fable: 3, opus: 5,  sonnet: 20, haiku: 50,  desc: '100 credits/day. Fable: 3, Opus: 5, Sonnet: 20, Haiku: 50.' },
+    heavy:     { credits: 200, fable: 5, opus: 10, sonnet: 40, haiku: 100, desc: '200 credits/day. Fable: 5, Opus: 10, Sonnet: 40, Haiku: 100.' },
+    unlimited: { credits: -1,  opus: -1, sonnet: -1, haiku: -1, fable: -1, desc: 'No limits. User has full unrestricted access.' },
   };
 
   var selectedPreset = 'light';
@@ -1223,6 +1400,7 @@
         opus: parseInt(document.getElementById('custom-opus').value, 10),
         sonnet: parseInt(document.getElementById('custom-sonnet').value, 10),
         haiku: parseInt(document.getElementById('custom-haiku').value, 10),
+        fable: parseInt(document.getElementById('custom-fable').value, 10),
       };
     } else {
       p = PRESETS[selectedPreset];
@@ -1240,6 +1418,9 @@
     }
     if (p.haiku !== -1) {
       limits.push({ type: 'per_model', model: 'haiku', window: 'daily', value: p.haiku });
+    }
+    if (p.fable !== undefined && p.fable !== -1) {
+      limits.push({ type: 'per_model', model: 'fable', window: 'daily', value: p.fable });
     }
     return limits;
   }
@@ -1292,6 +1473,80 @@
   /* ================================================================
      MODAL: EDIT LIMITS
      ================================================================ */
+  /* ================================================================
+     CLIENT PACKAGE
+     ================================================================ */
+
+  /**
+   * Download a user's connection ZIP. The admin API is Bearer-authenticated,
+   * so a plain link would 401 — fetch it and hand the browser a blob instead.
+   * First download for a user also provisions their account, which can take a
+   * few seconds, hence the button state.
+   */
+  function downloadClientPackage(userId, slug, btn) {
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '產生中...'; }
+
+    fetch('/api/admin/users/' + encodeURIComponent(userId) + '/client-package', {
+      headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json()
+            .catch(function () { return { error: 'HTTP ' + res.status }; })
+            .then(function (d) { throw new Error(d.error || 'Download failed'); });
+        }
+        return res.blob();
+      })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (slug || 'client') + '-claude.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Revoke late: Safari cancels the download if the URL dies too soon.
+        setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+        showToast('連線包已下載', '請用私訊管道傳給對方,檔案內含私鑰。', 'success');
+      })
+      .catch(function (err) {
+        showToast('產生失敗', err.message, 'error');
+      })
+      .finally(function () {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+      });
+  }
+
+  /** Issue a fresh key. Invalidates whatever the person already has. */
+  function rotateClientPackage(userId, userName, btn) {
+    if (!confirm('要為 ' + (userName || '這位使用者') + ' 重新產生連線包嗎?\n\n'
+               + '對方手上的舊檔案會立刻失效,必須重新傳一份新的給他。')) return;
+
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '產生中...'; }
+
+    fetch('/api/admin/users/' + encodeURIComponent(userId) + '/client-package', {
+      method: 'POST',
+      headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+    })
+      .then(function (res) {
+        return res.json().then(function (d) {
+          if (!res.ok) throw new Error(d.error || 'Rotate failed');
+          return d;
+        });
+      })
+      .then(function () {
+        showToast('已重新產生', '舊的連線包已失效,請下載新的並傳給對方。', 'success');
+      })
+      .catch(function (err) {
+        showToast('產生失敗', err.message, 'error');
+      })
+      .finally(function () {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+      });
+  }
+
   function openEditLimitsModal(userId) {
     API.getUser(userId).then(function (user) {
       var limits = user.limits || [];
@@ -1322,7 +1577,7 @@
       // Per-model limits
       html += '<h4 class="mb-1">Per-Model Limits (Daily)</h4>';
       html += '<p class="form-hint mb-2">-1 = unlimited, 0 = blocked</p>';
-      var models = ['opus', 'sonnet', 'haiku'];
+      var models = ['fable', 'opus', 'sonnet', 'haiku'];
       html += '<div class="form-row-3">';
       for (var mi = 0; mi < models.length; mi++) {
         var m = models[mi];
@@ -1365,6 +1620,7 @@
       '<div class="form-row-3 mb-1" id="time-rule-' + idx + '">' +
         '<div class="form-group"><label class="text-sm">Model</label>' +
         '<select class="time-rule-model">' +
+          '<option value="fable"' + (rule.model === 'fable' ? ' selected' : '') + '>Fable</option>' +
           '<option value="opus"' + (rule.model === 'opus' ? ' selected' : '') + '>Opus</option>' +
           '<option value="sonnet"' + (rule.model === 'sonnet' ? ' selected' : '') + '>Sonnet</option>' +
           '<option value="haiku"' + (rule.model === 'haiku' ? ' selected' : '') + '>Haiku</option>' +
@@ -1401,7 +1657,7 @@
     }
 
     // Per-model
-    var models = ['opus', 'sonnet', 'haiku'];
+    var models = ['fable', 'opus', 'sonnet', 'haiku'];
     for (var i = 0; i < models.length; i++) {
       var val = parseInt(document.getElementById('edit-' + models[i]).value, 10);
       if (!isNaN(val) && val !== -1) {
@@ -1500,7 +1756,7 @@
 
   function saveWeights() {
     var cw = {};
-    var models = ['opus', 'sonnet', 'haiku'];
+    var models = ['fable', 'opus', 'sonnet', 'haiku'];
     for (var i = 0; i < models.length; i++) {
       var el = document.getElementById('weight-' + models[i]);
       cw[models[i]] = parseInt(el.value, 10) || 0;
@@ -1672,6 +1928,23 @@
           openAddUserModal();
           break;
 
+        case 'refresh-subscription':
+          target.disabled = true;
+          target.textContent = '查詢中…';
+          // refresh=1 makes the server poll upstream now rather than serve
+          // the last snapshot, which can be up to 5 minutes old.
+          API.getSubscriptionUsage(true)
+            .then(function (data) {
+              if (data.error) showToast('查詢失敗', data.error, 'error');
+              navigate('overview');
+            })
+            .catch(function (err) {
+              target.disabled = false;
+              target.textContent = '重新整理';
+              showToast('Error', err.message, 'error');
+            });
+          break;
+
         case 'submit-add-user':
           submitAddUser();
           break;
@@ -1693,6 +1966,14 @@
 
         case 'delete-user':
           if (userId) deleteUser(userId, userName);
+          break;
+
+        case 'download-package':
+          if (userId) downloadClientPackage(userId, target.getAttribute('data-user-slug'), target);
+          break;
+
+        case 'rotate-package':
+          if (userId) rotateClientPackage(userId, userName, target);
           break;
 
         case 'edit-limits':

@@ -343,6 +343,11 @@ a:hover { color: var(--text-primary); }
 .card-body-flush { padding: 0; }
 
 /* Tables */
+/* .table-wrap was used throughout the markup but never styled, so a wide
+   table (the 6-column token breakdown) would stretch the whole page.
+   Scroll inside the wrapper instead. */
+.table-wrap { overflow-x: auto; }
+.mt-1 { margin-top: 0.5rem; }
 table { width: 100%; border-collapse: collapse; }
 table th, table td { padding: 0.85rem 1.5rem; text-align: left; border-bottom: 1px solid var(--border); }
 table th {

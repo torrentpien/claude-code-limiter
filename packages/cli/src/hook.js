@@ -31,20 +31,55 @@ const { execSync } = require("child_process");
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
 
+// Shared-host policy (root-owned, optional). When it sets per_os_user, the
+// identity is derived from the OS account instead of the environment — the uid
+// can't be faked, whereas a user controls their own shell and could otherwise
+// repoint CLAUDE_LIMITER_SERVER_FILE at a permissive server.
+const POLICY_FILE = path.join("/etc", "claude-code", "shared-host.json");
+function readPolicy() {
+  if (IS_WIN || IS_MAC) return null;
+  try {
+    return JSON.parse(fs.readFileSync(POLICY_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+const POLICY = readPolicy();
+const IS_ROOT = !!(process.getuid && process.getuid() === 0);
+const OS_USER = (() => {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return null;
+  }
+})();
+// Only non-root sessions are pinned; root bypasses the limiter entirely.
+const PER_OS_USER = !!(POLICY && POLICY.per_os_user && OS_USER && !IS_ROOT);
+const POLICY_BASE = (POLICY && POLICY.base) || path.join("/etc", "claude-code");
+
 // CLAUDE_LIMITER_DIR override: for testing or custom install locations.
-const LIMITER_DIR =
-  process.env.CLAUDE_LIMITER_DIR ||
-  (IS_WIN
-    ? path.join("C:", "Program Files", "ClaudeCode", "limiter")
-    : IS_MAC
-      ? path.join("/Library", "Application Support", "ClaudeCode", "limiter")
-      : path.join("/etc", "claude-code", "limiter"));
+// Ignored under per_os_user — the OS account is the identity.
+const LIMITER_DIR = PER_OS_USER
+  ? path.join(POLICY_BASE, `limiter-${OS_USER}`)
+  : process.env.CLAUDE_LIMITER_DIR ||
+    (IS_WIN
+      ? path.join("C:", "Program Files", "ClaudeCode", "limiter")
+      : IS_MAC
+        ? path.join("/Library", "Application Support", "ClaudeCode", "limiter")
+        : path.join("/etc", "claude-code", "limiter"));
 
 const CONFIG_FILE = path.join(LIMITER_DIR, "config.json");
-const SERVER_FILE = path.join(LIMITER_DIR, "server.json");
+// SERVER_FILE holds the server URL + this identity's auth token. On shared
+// hosts it lives outside the (writable) LIMITER_DIR in a root-only location so
+// the token/URL can't be repointed, while caches below stay user-writable.
+const SERVER_FILE = PER_OS_USER
+  ? path.join(POLICY_BASE, "secrets", `${OS_USER}.json`)
+  : process.env.CLAUDE_LIMITER_SERVER_FILE ||
+    path.join(LIMITER_DIR, "server.json");
 const CACHE_FILE = path.join(LIMITER_DIR, "cache.json");
 const MODEL_FILE = path.join(LIMITER_DIR, "session-model.txt");
 const USAGE_DIR = path.join(LIMITER_DIR, "usage");
+const TOKENS_DIR = path.join(LIMITER_DIR, "tokens");
 const DEBUG_LOG = path.join(LIMITER_DIR, "debug.log");
 
 const DEVICE_CACHE_FILE = path.join(LIMITER_DIR, "device-cache.json");
@@ -122,12 +157,13 @@ function readStdin() {
 //   8. config.defaultModel (detected during setup: Pro=sonnet, Max=opus)
 //   9. Falls back to "default"
 //
-// Normalization: string containing "opus"/"sonnet"/"haiku"
+// Normalization: string containing "fable"/"opus"/"sonnet"/"haiku"
 // maps to that family. Everything else → "default".
 // ════════════════════════════════════════════════════════════
 
 function normalizeModel(raw) {
   const lower = String(raw || "").toLowerCase();
+  if (lower.includes("fable")) return "fable";
   if (lower.includes("opus")) return "opus";
   if (lower.includes("sonnet")) return "sonnet";
   if (lower.includes("haiku")) return "haiku";
@@ -302,6 +338,162 @@ function cleanupOldUsage(keepDays) {
 }
 
 // ════════════════════════════════════════════════════════════
+// TOKEN ACCOUNTING — real usage, read out of the session transcript.
+//
+// Claude Code writes one JSONL line per assistant message, each carrying
+// message.usage. One API response that emits several content blocks
+// (text + tool_use + …) becomes SEVERAL lines that all repeat the SAME
+// cumulative usage — measured on a real transcript: 552 lines but only
+// 227 distinct requestIds, with zero disagreement inside a group. Summing
+// naively over-counts ~2.4x, so lines are deduped by requestId.
+//
+// Reads are incremental from a stored byte offset, so a turn whose Stop
+// hook was missed gets picked up on the next turn rather than lost, and
+// nothing is counted twice.
+// ════════════════════════════════════════════════════════════
+
+// Cache reads bill at ~10% and cache writes at ~125% of an input token, so
+// raw sums are meaningless — one real session showed 75M cache-read against
+// 30k true input. The weighted figure is the one worth reporting.
+function weighTokens(t) {
+  if (!t) return 0;
+  return Math.round(
+    (t.input || 0) +
+    (t.output || 0) +
+    1.25 * (t.cache_write || 0) +
+    0.1 * (t.cache_read || 0),
+  );
+}
+
+function emptyTokens() {
+  return { input: 0, output: 0, cache_write: 0, cache_read: 0 };
+}
+
+function addTokens(dst, src) {
+  dst.input += src.input;
+  dst.output += src.output;
+  dst.cache_write += src.cache_write;
+  dst.cache_read += src.cache_read;
+  return dst;
+}
+
+// requestIds kept between runs so a group split across a read boundary
+// (Stop fired while the response was still being written) isn't recounted.
+const SEEN_LIMIT = 200;
+
+/**
+ * Tokens written to the transcript since the last call, per normalized model.
+ * @returns {object|null} { fable: {input,output,cache_write,cache_read}, … }
+ */
+function readTokenDelta(transcriptPath, sessionId) {
+  if (!transcriptPath || !sessionId) return null;
+
+  const stateFile = path.join(TOKENS_DIR, `${sessionId}.json`);
+  const state = readJSON(stateFile) || { offset: 0, seen: [] };
+  if (typeof state.offset !== "number" || !Array.isArray(state.seen)) {
+    state.offset = 0;
+    state.seen = [];
+  }
+
+  let text;
+  let consumed;
+  try {
+    const size = fs.statSync(transcriptPath).size;
+    // Truncated or replaced underneath us — restart rather than read garbage.
+    if (size < state.offset) {
+      state.offset = 0;
+      state.seen = [];
+    }
+    if (size === state.offset) return null;
+
+    const fd = fs.openSync(transcriptPath, "r");
+    try {
+      const buf = Buffer.alloc(size - state.offset);
+      fs.readSync(fd, buf, 0, buf.length, state.offset);
+      // Stop at the last newline; a trailing partial line is left for next time.
+      // Indexing the Buffer keeps this a BYTE offset — decoding first and using
+      // string indices would drift on any multi-byte character.
+      const nl = buf.lastIndexOf(0x0a);
+      if (nl < 0) return null;
+      consumed = nl + 1;
+      text = buf.subarray(0, consumed).toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    debugLog(`TOKENS read failed: ${err.message}`);
+    return null;
+  }
+
+  const seen = new Set(state.seen);
+  const perModel = {};
+  let counted = 0;
+
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (!entry || entry.type !== "assistant") continue;
+
+    const msg = entry.message;
+    if (!msg || !msg.usage) continue;
+    // Locally-generated placeholders (API errors, interrupts). Always all-zero.
+    if (msg.model === "<synthetic>") continue;
+
+    const key = entry.requestId || entry.uuid;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    state.seen.push(key);
+
+    const u = msg.usage;
+    const model = normalizeModel(msg.model);
+    const acc = perModel[model] || (perModel[model] = emptyTokens());
+    acc.input += u.input_tokens || 0;
+    acc.output += u.output_tokens || 0;
+    acc.cache_write += u.cache_creation_input_tokens || 0;
+    acc.cache_read += u.cache_read_input_tokens || 0;
+    counted++;
+  }
+
+  state.offset += consumed;
+  if (state.seen.length > SEEN_LIMIT) {
+    state.seen = state.seen.slice(-SEEN_LIMIT);
+  }
+  writeJSON(stateFile, state);
+  cleanupTokenState();
+
+  return counted ? perModel : null;
+}
+
+function cleanupTokenState(keepDays) {
+  const cutoff = Date.now() - (keepDays || 7) * 86400000;
+  try {
+    for (const f of fs.readdirSync(TOKENS_DIR)) {
+      if (!f.endsWith(".json")) continue;
+      const p = path.join(TOKENS_DIR, f);
+      try {
+        if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+      } catch {}
+    }
+  } catch {}
+}
+
+/**
+ * The model that did most of the work in a delta, by weighted tokens.
+ * Unlike detectModel() this is what actually served the response.
+ */
+function dominantModel(perModel) {
+  if (!perModel) return null;
+  let best = null;
+  let bestWeight = -1;
+  for (const m of Object.keys(perModel)) {
+    const w = weighTokens(perModel[m]);
+    if (w > bestWeight) { bestWeight = w; best = m; }
+  }
+  return best;
+}
+
+// ════════════════════════════════════════════════════════════
 // LOCAL LIMIT EVALUATION (offline fallback)
 // ════════════════════════════════════════════════════════════
 
@@ -309,7 +501,7 @@ function evaluateLimitsLocally(config, model, usage) {
   if (!config || !config.limits) return { allowed: true };
 
   const limits = config.limits;
-  const creditWeights = config.credit_weights || { opus: 10, sonnet: 3, haiku: 1 };
+  const creditWeights = config.credit_weights || { opus: 10, sonnet: 3, haiku: 1, fable: 20 };
 
   // Check kill/pause status
   if (config.status === "killed" || config.status === "paused") {
@@ -377,12 +569,12 @@ function evaluateLimitsLocally(config, model, usage) {
 // ════════════════════════════════════════════════════════════
 
 function buildBlockMessage(config, model, usage, reason) {
-  const creditWeights = config.credit_weights || { opus: 10, sonnet: 3, haiku: 1 };
+  const creditWeights = config.credit_weights || { opus: 10, sonnet: 3, haiku: 1, fable: 20 };
   const limits = config.limits || [];
   const lines = [reason, ""];
 
   // Usage summary
-  const models = ["opus", "sonnet", "haiku"];
+  const models = ["fable", "opus", "sonnet", "haiku"];
   const summaryLines = [];
   for (const m of models) {
     const used = usage[m] || 0;
@@ -501,7 +693,9 @@ async function actionCheck(config) {
     if (serverResp.status === "killed") {
       allowed = false;
       reason = "Your Claude Code access has been revoked by the admin.\nContact your admin to restore access.";
-      triggerLogout();
+      // On shared hosts the Claude login belongs to everyone — a kill must
+      // block this user's prompts/tools, not log the whole machine out.
+      if (!config.shared_host) triggerLogout();
     } else if (serverResp.status === "paused") {
       allowed = false;
       reason = "Your Claude Code access has been paused by the admin.\nContact your admin to resume access.";
@@ -530,13 +724,40 @@ async function actionCheck(config) {
  */
 async function actionCount(config) {
   const stdinData = readStdin();
-  const model = detectModel(stdinData, config);
+
+  const byModel = readTokenDelta(
+    stdinData.transcript_path,
+    stdinData.session_id,
+  );
+
+  // The transcript names the model that actually served each response, so it
+  // beats detectModel()'s inference from settings files — which is blind to
+  // e.g. `claude -p --model x`. Fall back when the delta is empty or the
+  // model string was unrecognized.
+  const fromTranscript = dominantModel(byModel);
+  const model = (fromTranscript && fromTranscript !== "default")
+    ? fromTranscript
+    : detectModel(stdinData, config);
+
   const usage = loadUsage();
   const prev = usage[model] || 0;
   usage[model] = prev + 1;
   saveUsage(usage);
   cleanupOldUsage();
-  debugLog(`COUNT model=${model} ${prev} → ${prev + 1}`);
+
+  let tokens = null;
+  if (byModel) {
+    tokens = emptyTokens();
+    for (const m of Object.keys(byModel)) addTokens(tokens, byModel[m]);
+    tokens.weighted = weighTokens(tokens);
+  }
+
+  debugLog(
+    `COUNT model=${model} ${prev} → ${prev + 1}` +
+    (tokens
+      ? ` tokens in=${tokens.input} out=${tokens.output} cw=${tokens.cache_write} cr=${tokens.cache_read} weighted=${tokens.weighted}`
+      : " tokens=none"),
+  );
 
   // Fire and forget
   serverRequest("/api/v1/count", {
@@ -544,6 +765,8 @@ async function actionCount(config) {
     timestamp: new Date().toISOString(),
     session_id: stdinData.session_id || null,
     response_length: (stdinData.last_assistant_message || "").length,
+    tokens,
+    tokens_by_model: byModel,
   }, 3000);
 }
 
@@ -610,7 +833,7 @@ function actionStatus(config) {
   console.log("");
 
   const limits = (config && config.limits) || [];
-  const creditWeights = (config && config.credit_weights) || { opus: 10, sonnet: 3, haiku: 1 };
+  const creditWeights = (config && config.credit_weights) || { opus: 10, sonnet: 3, haiku: 1, fable: 20 };
 
   if (limits.length === 0) {
     console.log("  No limits configured — unlimited mode\n");
@@ -621,7 +844,7 @@ function actionStatus(config) {
   console.log("  │ Model      │ Used  │ Limit │ Progress             │ Left     │");
   console.log("  ├────────────┼───────┼───────┼──────────────────────┼──────────┤");
 
-  for (const m of ["opus", "sonnet", "haiku"]) {
+  for (const m of ["fable", "opus", "sonnet", "haiku"]) {
     const used = usage[m] || 0;
     const rule = limits.find((r) => r.type === "per_model" && (r.model === m || !r.model));
     const limit = rule ? rule.value : -1;
@@ -658,6 +881,15 @@ function actionStatus(config) {
 
 async function main() {
   const action = process.argv[2] || "check";
+
+  // Root sessions are never gated or tracked. Consistent with the documented
+  // threat model (root can bypass by editing these files anyway), and required
+  // on shared hosts so admin sessions can't be locked out by a dead server.
+  if (action !== "status" && IS_ROOT) {
+    readStdin();
+    return;
+  }
+
   const config = readJSON(CONFIG_FILE);
   _debugEnabled = !!(config && config.debug);
 

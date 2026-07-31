@@ -6,6 +6,7 @@ const db = require('../db');
 const { verifyPassword, hashPassword, createJWT, adminAuth } = require('../services/auth');
 const { getUsageSummary, getCreditBalance } = require('../services/usage');
 const { broadcast } = require('../ws');
+const subscriptionUsage = require('../services/subscription-usage');
 
 /**
  * POST /api/admin/login
@@ -424,6 +425,133 @@ router.put('/settings', (req, res) => {
   } catch (err) {
     console.error('PUT /settings error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/* ==================================================================
+   CLIENT PACKAGE  (one-click connection ZIP, per user)
+   ==================================================================
+   Hands the admin a ready-to-send ZIP for one person: their SSH key, a
+   double-click launcher, and instructions. Generating it also provisions the
+   person's OS account, so "download" is the only step needed to onboard.
+
+   The ZIP contains a private key, so it is cached on disk (root-only) and the
+   same file is served on every download — regenerating would silently
+   invalidate a package the person is already using. Rotation is an explicit
+   POST.
+   ================================================================== */
+
+const { execFileSync } = require('child_process');
+const fsx = require('fs');
+const pathx = require('path');
+
+// repo root: .../packages/server/src/server/routes -> up 5
+const REPO_ROOT = pathx.join(__dirname, '..', '..', '..', '..', '..');
+const MAKE_CLIENT = pathx.join(REPO_ROOT, 'make-client.sh');
+
+function packagePath(slug) {
+  return pathx.join(REPO_ROOT, 'dist', `${slug}-claude.zip`);
+}
+
+// The slug becomes a Unix account name, so hold it to the same rule
+// provision-user.sh enforces rather than letting useradd fail obscurely.
+function validSlug(slug) {
+  return /^[a-z_][a-z0-9_-]{0,30}$/.test(slug || '');
+}
+
+function buildPackage(user) {
+  execFileSync('bash', [MAKE_CLIENT, user.slug, '-'], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, AUTH_TOKEN: user.auth_token },
+    stdio: 'pipe',
+    timeout: 120000,
+  });
+  return packagePath(user.slug);
+}
+
+function sendPackage(res, user, zip) {
+  const stat = fsx.statSync(zip);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${user.slug}-claude.zip"`
+  );
+  // Contains a private key — never let a proxy or the browser keep a copy.
+  res.setHeader('Cache-Control', 'no-store, private');
+  fsx.createReadStream(zip).pipe(res);
+}
+
+/**
+ * GET /api/admin/users/:id/client-package
+ * Download this user's connection ZIP, building it on first request.
+ */
+router.get('/users/:id/client-package', (req, res) => {
+  try {
+    const user = db.getUser(req.params.id);
+    if (!user || user.team_id !== req.team.id) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!validSlug(user.slug)) {
+      return res.status(400).json({
+        error: `Slug "${user.slug}" cannot be a Linux account name. Use lowercase letters, digits, "-" or "_", not starting with a digit.`,
+      });
+    }
+
+    let zip = packagePath(user.slug);
+    if (!fsx.existsSync(zip)) zip = buildPackage(user);
+    return sendPackage(res, user, zip);
+  } catch (err) {
+    const detail = (err.stderr && err.stderr.toString().trim()) || err.message;
+    console.error('GET /users/:id/client-package error:', detail);
+    res.status(500).json({ error: `Could not build package: ${detail}` });
+  }
+});
+
+/**
+ * POST /api/admin/users/:id/client-package
+ * Rotate: issue a fresh key and rebuild. Invalidates any package already
+ * handed out, which is the point — use it when a key is lost or leaked.
+ */
+router.post('/users/:id/client-package', (req, res) => {
+  try {
+    const user = db.getUser(req.params.id);
+    if (!user || user.team_id !== req.team.id) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!validSlug(user.slug)) {
+      return res.status(400).json({ error: `Slug "${user.slug}" cannot be a Linux account name.` });
+    }
+    const zip = packagePath(user.slug);
+    if (fsx.existsSync(zip)) fsx.unlinkSync(zip);
+    buildPackage(user);
+    res.json({ ok: true, rotated: true, slug: user.slug });
+  } catch (err) {
+    const detail = (err.stderr && err.stderr.toString().trim()) || err.message;
+    console.error('POST /users/:id/client-package error:', detail);
+    res.status(500).json({ error: `Could not rebuild package: ${detail}` });
+  }
+});
+
+/**
+ * GET /api/admin/subscription-usage
+ * The shared Claude subscription's own limits — not per-user.
+ * `?refresh=1` forces a fresh poll instead of returning the last snapshot.
+ */
+router.get('/subscription-usage', async (req, res) => {
+  try {
+    if (req.query.refresh) {
+      const result = await subscriptionUsage.poll();
+      if (!result.ok) {
+        // Serve the stale snapshot rather than nothing — a failed poll
+        // shouldn't blank the dashboard.
+        return res.json({ ...db.getLatestSubscriptionUsage(), error: result.error });
+      }
+    }
+    res.json(db.getLatestSubscriptionUsage());
+  } catch (err) {
+    console.error('GET /subscription-usage error:', err);
+    res.status(500).json({ error: 'Failed to load subscription usage' });
   }
 });
 

@@ -8,6 +8,7 @@ const db = require('./db');
 const hookApi = require('./routes/hook-api');
 const adminApi = require('./routes/admin-api');
 const { setupWebSocket } = require('./ws');
+const subscriptionUsage = require('./services/subscription-usage');
 
 const app = express();
 const server = http.createServer(app);
@@ -85,6 +86,13 @@ function start(port) {
   // Seed default team
   const adminPassword = process.env.ADMIN_PASSWORD;
   db.seed(adminPassword);
+
+  // Watch the shared subscription's own ceiling. Opt out with
+  // SUBSCRIPTION_USAGE_POLL=off (e.g. when the box has no Claude login).
+  if (process.env.SUBSCRIPTION_USAGE_POLL !== 'off') {
+    const interval = parseInt(process.env.SUBSCRIPTION_USAGE_INTERVAL_MS, 10);
+    subscriptionUsage.start(Number.isFinite(interval) ? interval : undefined);
+  }
 
   server.listen(port, () => {
     console.log(`Claude Code Limiter server listening on port ${port}`);

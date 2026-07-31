@@ -9,14 +9,16 @@ const db = require('../db');
  * @param {number} creditCost - cost from credit_weights
  * @param {string} [timestamp] - ISO string, defaults to now
  * @param {string} [source] - 'hook' | 'server', defaults to 'hook'
+ * @param {object} [tokens] - { input, output, cache_write, cache_read, weighted }
  */
-function recordEvent(userId, model, creditCost, timestamp, source) {
+function recordEvent(userId, model, creditCost, timestamp, source, tokens) {
   return db.recordUsage({
     userId,
     model,
     creditCost,
     timestamp: timestamp || new Date().toISOString(),
     source: source || 'hook',
+    tokens: tokens || null,
   });
 }
 
@@ -46,6 +48,8 @@ function getUsageSummary(userId, tz) {
     summary[w] = {
       counts: data.counts,
       totalCredits: data.totalCredits,
+      tokens: data.tokens,
+      tokensByModel: data.tokensByModel,
       windowStart: data.windowStart,
     };
   }

@@ -35,7 +35,7 @@ function init(dbPath) {
       id              TEXT PRIMARY KEY,
       name            TEXT NOT NULL,
       admin_password  TEXT NOT NULL,
-      credit_weights  TEXT NOT NULL DEFAULT '{"opus":10,"sonnet":3,"haiku":1}',
+      credit_weights  TEXT NOT NULL DEFAULT '{"opus":10,"sonnet":3,"haiku":1,"fable":20}',
       created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -123,10 +123,76 @@ function init(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_limit_rule_user ON limit_rule(user_id);
     CREATE INDEX IF NOT EXISTS idx_install_code_user ON install_code(user_id);
     CREATE INDEX IF NOT EXISTS idx_device_user ON device(user_id);
+
+    -- Token usage split by the model that actually served each response.
+    -- Separate from usage_event because one turn can involve more than one
+    -- model (subagents), while usage_event must stay exactly one row per turn
+    -- or every COUNT(*)-based limit would break.
+    CREATE TABLE IF NOT EXISTS token_event (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id            TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+      model              TEXT NOT NULL,
+      input_tokens       INTEGER NOT NULL DEFAULT 0,
+      output_tokens      INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+      weighted_tokens    INTEGER NOT NULL DEFAULT 0,
+      timestamp          DATETIME NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_token_user_ts ON token_event(user_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_token_model_ts ON token_event(user_id, model, timestamp);
+
+    -- Snapshots of the shared Claude subscription's own limits. Not tied to a
+    -- user: everyone on this box logs in as the same account, so this is one
+    -- pool. Percentages only -- the upstream API publishes no token figures
+    -- for subscription plans.
+    CREATE TABLE IF NOT EXISTS subscription_usage (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind        TEXT NOT NULL,
+      group_name  TEXT,
+      label       TEXT NOT NULL,
+      scope_model TEXT,
+      percent     INTEGER,
+      severity    TEXT,
+      resets_at   DATETIME,
+      is_active   INTEGER NOT NULL DEFAULT 0,
+      timestamp   DATETIME NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sub_usage_ts ON subscription_usage(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_sub_usage_kind_ts ON subscription_usage(kind, scope_model, timestamp);
   `);
+
+  migrate();
 
   console.log(`Database initialized at ${dbPath}`);
   return db;
+}
+
+/**
+ * Additive schema migrations for databases created before a column existed.
+ * Every column added here must be nullable — existing rows keep NULL, which
+ * reads as "recorded before token accounting" rather than "zero tokens".
+ */
+function migrate() {
+  const cols = new Set(
+    db.prepare('PRAGMA table_info(usage_event)').all().map(c => c.name)
+  );
+  const added = [
+    ['input_tokens', 'INTEGER'],
+    ['output_tokens', 'INTEGER'],
+    ['cache_write_tokens', 'INTEGER'],
+    ['cache_read_tokens', 'INTEGER'],
+    ['weighted_tokens', 'INTEGER'],
+  ].filter(([name]) => !cols.has(name));
+
+  for (const [name, type] of added) {
+    db.exec(`ALTER TABLE usage_event ADD COLUMN ${name} ${type}`);
+  }
+  if (added.length) {
+    console.log(`Migrated usage_event: added ${added.map(c => c[0]).join(', ')}`);
+  }
 }
 
 /**
@@ -144,7 +210,7 @@ function seed(adminPassword) {
 
   conn.prepare(
     'INSERT INTO team (id, name, admin_password, credit_weights) VALUES (?, ?, ?, ?)'
-  ).run(teamId, 'Default Team', hash, JSON.stringify({ opus: 10, sonnet: 3, haiku: 1 }));
+  ).run(teamId, 'Default Team', hash, JSON.stringify({ opus: 10, sonnet: 3, haiku: 1, fable: 20 }));
 
   console.log(`Default team created (id: ${teamId})`);
   if (password === 'changeme') {
@@ -268,12 +334,22 @@ function deleteLimitRulesForUser(userId) {
 
 // --------------- Usage Event helpers ---------------
 
-function recordUsage({ userId, model, creditCost, timestamp, source }) {
+function recordUsage({ userId, model, creditCost, timestamp, source, tokens }) {
   const ts = timestamp || new Date().toISOString();
   const src = source || 'hook';
+  const t = tokens || {};
+  // NULL, not 0, when the client sent nothing — so "no token data" stays
+  // distinguishable from "a turn that genuinely used none".
+  const n = (v) => (typeof v === 'number' && isFinite(v) ? Math.round(v) : null);
   return getDb().prepare(
-    'INSERT INTO usage_event (user_id, model, credit_cost, timestamp, source) VALUES (?, ?, ?, ?, ?)'
-  ).run(userId, model, creditCost, ts, src);
+    `INSERT INTO usage_event
+       (user_id, model, credit_cost, timestamp, source,
+        input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, weighted_tokens)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId, model, creditCost, ts, src,
+    n(t.input), n(t.output), n(t.cache_write), n(t.cache_read), n(t.weighted)
+  );
 }
 
 /**
@@ -285,7 +361,7 @@ function getUsage(userId, since) {
     'SELECT model, COUNT(*) AS count FROM usage_event WHERE user_id = ? AND timestamp >= ? GROUP BY model'
   ).all(userId, since);
 
-  const result = { opus: 0, sonnet: 0, haiku: 0, default: 0 };
+  const result = { opus: 0, sonnet: 0, haiku: 0, fable: 0, default: 0 };
   for (const row of rows) {
     result[row.model] = row.count;
   }
@@ -300,13 +376,147 @@ function getUsageWithCredits(userId, since) {
     'SELECT model, COUNT(*) AS count, SUM(credit_cost) AS total_credits FROM usage_event WHERE user_id = ? AND timestamp >= ? GROUP BY model'
   ).all(userId, since);
 
-  const counts = { opus: 0, sonnet: 0, haiku: 0, default: 0 };
+  const counts = { opus: 0, sonnet: 0, haiku: 0, fable: 0, default: 0 };
   let totalCredits = 0;
   for (const row of rows) {
     counts[row.model] = row.count;
     totalCredits += row.total_credits;
   }
-  return { counts, totalCredits };
+  // Tokens come from token_event, not from usage_event's per-turn columns:
+  // a turn attributes its whole token spend to one model, which is wrong
+  // whenever a subagent ran on a different one.
+  const { tokens, tokensByModel } = getTokenUsage(userId, since);
+  return { counts, totalCredits, tokens, tokensByModel };
+}
+
+function emptyTokenTotals() {
+  return { input: 0, output: 0, cache_write: 0, cache_read: 0, weighted: 0 };
+}
+
+// --------------- Subscription usage (shared account ceiling) ---------------
+
+/**
+ * Store one poll's worth of limit rows.
+ * @param {object[]} rows - from services/subscription-usage normalize()
+ * @param {string} timestamp - ISO string; identical across the batch
+ */
+function recordSubscriptionUsage(rows, timestamp) {
+  if (!rows || !rows.length) return 0;
+  const ts = timestamp || new Date().toISOString();
+  const stmt = getDb().prepare(
+    `INSERT INTO subscription_usage
+       (kind, group_name, label, scope_model, percent, severity, resets_at, is_active, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const insertAll = getDb().transaction((items) => {
+    for (const r of items) {
+      stmt.run(
+        r.kind, r.groupName, r.label, r.scopeModel,
+        r.percent, r.severity, r.resetsAt, r.isActive, ts
+      );
+    }
+  });
+  insertAll(rows);
+  return rows.length;
+}
+
+/**
+ * The most recent snapshot, as a list of limits.
+ * Buckets come and go between polls (a scoped cap only appears once the
+ * upstream account has one), so select by the newest timestamp rather than
+ * assuming a fixed set of rows.
+ */
+function getLatestSubscriptionUsage() {
+  const latest = getDb()
+    .prepare('SELECT MAX(timestamp) AS ts FROM subscription_usage')
+    .get();
+  if (!latest || !latest.ts) return { timestamp: null, limits: [] };
+
+  const limits = getDb().prepare(
+    `SELECT kind, group_name, label, scope_model, percent, severity, resets_at, is_active
+       FROM subscription_usage
+      WHERE timestamp = ?
+      ORDER BY id`
+  ).all(latest.ts);
+
+  return { timestamp: latest.ts, limits };
+}
+
+/**
+ * History for one bucket, oldest first — for charting a burn-down.
+ */
+function getSubscriptionUsageHistory(kind, scopeModel, since) {
+  return getDb().prepare(
+    `SELECT percent, severity, resets_at, timestamp
+       FROM subscription_usage
+      WHERE kind = ?
+        AND (scope_model IS ? OR scope_model = ?)
+        AND timestamp >= ?
+      ORDER BY timestamp`
+  ).all(kind, scopeModel || null, scopeModel || null, since);
+}
+
+function cleanupOldSubscriptionUsage(days) {
+  const cutoff = new Date(Date.now() - (days || 30) * 86400000).toISOString();
+  return getDb()
+    .prepare('DELETE FROM subscription_usage WHERE timestamp < ?')
+    .run(cutoff);
+}
+
+/**
+ * Record the per-model token split for one turn.
+ * @param {string} userId
+ * @param {object} byModel - { fable: {input, output, cache_write, cache_read, weighted}, … }
+ * @param {string} timestamp
+ */
+function recordTokensByModel(userId, byModel, timestamp) {
+  if (!byModel) return 0;
+  const ts = timestamp || new Date().toISOString();
+  const stmt = getDb().prepare(
+    `INSERT INTO token_event
+       (user_id, model, input_tokens, output_tokens,
+        cache_write_tokens, cache_read_tokens, weighted_tokens, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  let n = 0;
+  const insertAll = getDb().transaction((entries) => {
+    for (const [model, t] of entries) {
+      stmt.run(userId, model, t.input, t.output, t.cache_write, t.cache_read, t.weighted, ts);
+      n++;
+    }
+  });
+  insertAll(Object.entries(byModel));
+  return n;
+}
+
+/**
+ * Token totals since a timestamp, overall and split by model.
+ */
+function getTokenUsage(userId, since) {
+  const rows = getDb().prepare(
+    `SELECT model,
+            SUM(input_tokens)       AS input,
+            SUM(output_tokens)      AS output,
+            SUM(cache_write_tokens) AS cache_write,
+            SUM(cache_read_tokens)  AS cache_read,
+            SUM(weighted_tokens)    AS weighted
+       FROM token_event
+      WHERE user_id = ? AND timestamp >= ?
+      GROUP BY model`
+  ).all(userId, since);
+
+  const tokens = emptyTokenTotals();
+  const tokensByModel = {};
+  for (const row of rows) {
+    const t = {
+      input: row.input, output: row.output,
+      cache_write: row.cache_write, cache_read: row.cache_read,
+      weighted: row.weighted,
+    };
+    tokensByModel[row.model] = t;
+    for (const k of Object.keys(tokens)) tokens[k] += t[k];
+  }
+  return { tokens, tokensByModel };
 }
 
 /**
@@ -378,7 +588,9 @@ function getDatePartsInTZ(date, timeZone) {
     weekday: 'short',
     hour: 'numeric',
     minute: 'numeric',
-    hour12: false,
+    // hour12:false renders midnight as hour "24", which pushed window starts
+    // back a full day for UTC-offset-0 timezones; h23 keeps midnight at "00".
+    hourCycle: 'h23',
   });
   const parts = formatter.formatToParts(date);
   const map = {};
@@ -390,7 +602,7 @@ function getDatePartsInTZ(date, timeZone) {
     year: parseInt(map.year, 10),
     month: parseInt(map.month, 10),
     day: parseInt(map.day, 10),
-    hour: parseInt(map.hour, 10),
+    hour: parseInt(map.hour, 10) % 24,
     minute: parseInt(map.minute, 10),
     dayOfWeek: dayOfWeekMap[map.weekday] ?? 0,
   };
@@ -755,6 +967,12 @@ module.exports = {
   deleteLimitRulesForUser,
   // Usage
   recordUsage,
+  recordTokensByModel,
+  getTokenUsage,
+  recordSubscriptionUsage,
+  getLatestSubscriptionUsage,
+  getSubscriptionUsageHistory,
+  cleanupOldSubscriptionUsage,
   getUsage,
   getUsageWithCredits,
   getUsageForWindow,

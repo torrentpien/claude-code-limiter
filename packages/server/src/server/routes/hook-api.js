@@ -212,6 +212,45 @@ router.post('/check', hookAuth, (req, res) => {
  * Stop: record a completed turn.
  * Body: { auth_token, model, timestamp?, session_id?, response_length? }
  */
+const TOKEN_FIELDS = ['input', 'output', 'cache_write', 'cache_read'];
+
+/**
+ * Coerce a client-supplied token object into safe integers, or null.
+ * weighted is recomputed here rather than trusted, so the stored figure
+ * always matches the pricing model the dashboard reports.
+ */
+function sanitizeTokens(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  let any = false;
+  for (const f of TOKEN_FIELDS) {
+    const v = raw[f];
+    out[f] = (typeof v === 'number' && isFinite(v) && v >= 0) ? Math.round(v) : 0;
+    if (out[f] > 0) any = true;
+  }
+  if (!any) return null;
+  out.weighted = Math.round(
+    out.input + out.output + 1.25 * out.cache_write + 0.1 * out.cache_read
+  );
+  return out;
+}
+
+// Model keys the hook is allowed to report. An unrecognized name would
+// otherwise create arbitrary rows in token_event from client-controlled input.
+const KNOWN_MODELS = ['fable', 'opus', 'sonnet', 'haiku', 'default'];
+
+function sanitizeTokensByModel(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  let any = false;
+  for (const model of Object.keys(raw)) {
+    if (!KNOWN_MODELS.includes(model)) continue;
+    const t = sanitizeTokens(raw[model]);
+    if (t) { out[model] = t; any = true; }
+  }
+  return any ? out : null;
+}
+
 router.post('/count', hookAuth, (req, res) => {
   try {
     const user = req.user;
@@ -224,8 +263,17 @@ router.post('/count', hookAuth, (req, res) => {
     // Calculate credit cost
     const creditCost = creditWeights[model] || creditWeights['default'] || 1;
 
+    // Token counts come from the client's transcript, so treat them as
+    // untrusted input: keep only finite non-negative numbers, drop the rest.
+    const tokens = sanitizeTokens(req.body.tokens);
+
     // Record the usage event (existing behavior)
-    recordEvent(user.id, model, creditCost, timestamp, 'hook');
+    recordEvent(user.id, model, creditCost, timestamp, 'hook', tokens);
+
+    // Per-model split, so a turn that used a subagent on another model is
+    // attributed correctly. Kept out of usage_event to preserve one-row-per-turn.
+    const byModel = sanitizeTokensByModel(req.body.tokens_by_model);
+    if (byModel) db.recordTokensByModel(user.id, byModel, timestamp);
 
     // Update device last_seen and IP
     const devices = db.getDevices(user.id);
