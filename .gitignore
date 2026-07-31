@@ -8,3 +8,7 @@ debug.log
 .DS_Store
 tests/assumptions/logs/
 tests/assumptions/backups/
+
+# Generated client connection packages. Each ZIP embeds that person's private
+# SSH key -- committing one would publish a working credential.
+dist/
