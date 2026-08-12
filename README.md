@@ -691,13 +691,13 @@ git fetch upstream
 
 > **出處。** 本專案源自
 > **[howincodes/claude-code-limiter](https://github.com/howincodes/claude-code-limiter)**
-> 的 fork,作者為 [howincodes](https://github.com/howincodes) 與
-> [farisbasha](https://github.com/farisbasha),採 MIT 授權。目前採取以指令次數計量的
+> 的 fork，作者為 [howincodes](https://github.com/howincodes) 與
+> [farisbasha](https://github.com/farisbasha)，採 MIT 授權。目前採取以指令次數計量的
 > 限流器、hook 架構與儀表板都是原來的設計，本專案修正了
-> 加入了共用主機部署、token 層級的計量,以及訂閱上限監控 —— 詳見
+> 加入了共用主機部署、token 層級的計量，以及訂閱上限監控 —— 詳見
 > [這個 fork 加了什麼](#這個-fork-加了什麼) 與 [致謝](#致謝)。
 
-> **Beta。** 對著一套實際運行的部署持續開發中,可能會壞、API 可能會變。
+> **Beta。** 對著一套實際運行的部署持續開發中，可能會壞、API 可能會變。
 > 問題回報與 PR 歡迎送到
 > [torrentpien/claude-code-limiter](https://github.com/torrentpien/claude-code-limiter/issues)。
 
@@ -705,24 +705,24 @@ git fetch upstream
 
 ## 問題在哪
 
-你付錢訂了 Claude Code Max,讓幾個人一起用。
+你付錢訂了 Claude Code Max，讓幾個人一起用。
 
-然後某個人使用Fable,短時間內將token全部耗光,其他人什麼都做不了。
+然後某個人使用Fable，短時間內將token全部耗光，其他人什麼都做不了。
 
-Claude Code **沒有任何內建的用量管控**。沒有個人上限、沒有配額,也看不到誰用了多少。
+Claude Code **沒有任何內建的用量管控**。沒有個人上限、沒有配額，也看不到誰用了多少。
 
 ## 這個專案做什麼
 
-對共用Claude Code帳號的用量管控:
+對共用Claude Code帳號的用量管控：
 
 - **個人額度** —— 每人每模型的每日 / 每週 / 每月 / 滾動 24 小時上限
-- **點數預算** —— 一份跨所有模型的預算,每個人自己決定怎麼花
-- **Token 計量** —— 每個人實際消耗了多少,而不只是按了幾次 Enter
+- **點數預算** —— 一份跨所有模型的預算，每個人自己決定怎麼花
+- **Token 計量** —— 每個人實際消耗了多少，而不只是按了幾次 Enter
 - **訂閱上限監控** —— 你的**方案本身**的 5 小時、每週、Fable 每週額度用掉多少了
 - **即時儀表板** —— 現在誰在用什麼
 - **停權開關** —— 遠端即時撤銷存取權
 
-每台機器上有一個系統層級的 hook,在每個 prompt 送出時檢查上限,並和你自架的伺服器
+每台機器上有一個系統層級的 hook，在每個 prompt 送出時檢查上限，並和你自架的伺服器
 確認額度。
 
 ---
@@ -734,45 +734,45 @@ Claude Code **沒有任何內建的用量管控**。沒有個人上限、沒有�
 
 ### 真實的 token 計量
 
-Hook 會讀取 Claude Code 自己的對話紀錄(transcript),按模型、按回合記錄
+Hook 會讀取 Claude Code 自己的對話紀錄（transcript），按模型、按回合記錄
 `input` / `output` / `cache_write` / `cache_read`。
 
-- **以 `requestId` 去重。** 一次 API 回應在 transcript 裡會被寫成好幾行 JSONL,
+- **以 `requestId` 去重。** 一次 API 回應在 transcript 裡會被寫成好幾行 JSONL，
   每一行都重複同一份累計用量。直接把每行加總會**多算約 2.4 倍**。
-- **加權總量** —— `input + output + 1.25 × cache_write + 0.1 × cache_read`,
-  對應各類 token 的相對價格。原始加總在實務上沒有意義:某一週的真實數據裡,
-  cache read 是 3,580 萬,而真正的 input 只有 9,986。
-- **增量讀取。** 從位元組偏移量往後讀,成本只跟新增的內容成正比,與檔案大小無關。
-- **按模型歸屬。** 一個中途換模型的回合會被拆開分別計入,而不是全部算在最後
+- **加權總量** —— `input + output + 1.25 × cache_write + 0.1 × cache_read`，
+  對應各類 token 的相對價格。原始加總在實務上沒有意義：某一週的真實數據裡，
+  cache read 是 3,580 萬，而真正的 input 只有 9,986。
+- **增量讀取。** 從位元組偏移量往後讀，成本只跟新增的內容成正比，與檔案大小無關。
+- **按模型歸屬。** 一個中途換模型的回合會被拆開分別計入，而不是全部算在最後
   剛好在用的那個模型頭上。
 
-**只監督,不管控。** 沒有任何東西會因為 token 用量被擋 —— prompt 次數和點數規則
-仍然是唯一的關卡。token 管控刻意留作第二階段,等累積夠多資料、能訂出站得住腳的
+**只監督，不管控。** 沒有任何東西會因為 token 用量被擋 —— prompt 次數和點數規則
+仍然是唯一的關卡。token 管控刻意留作第二階段，等累積夠多資料、能訂出站得住腳的
 門檻之後再說。
 
 ### 訂閱上限監控
 
-背景程式讀取 Claude Code CLI 執行 `/status` 時用的同一個 OAuth 用量,
-記錄你的方案實際上被三個什麼樣的計量器判定:
+背景程式讀取 Claude Code CLI 執行 `/status` 時用的同一個 OAuth 用量，
+記錄你的方案實際上被三個什麼樣的計量器判定：
 
 | 計量器 | 內容 |
 |---|---|
 | **Session (5h)** | 跨所有模型的滾動 5 小時視窗 |
-| **Weekly (all models)** | 每週上限,通常是最先卡住的那個 |
+| **Weekly (all models)** | 每週上限，通常是最先卡住的那個 |
 | **Fable (weekly)** | Fable 專屬的每週子上限 |
 
 計算**只回傳百分比** —— 金額欄位一律是 null —— 所以儀表板顯示的是百分比、
-嚴重程度,以及距離重置的時間。歷史紀錄會保留下來,這正是後續能夠反推絕對 token
-數字的關鍵:拿它去對照實測的 transcript 用量做校正。
+嚴重程度，以及距離重置的時間。歷史紀錄會保留下來，這正是後續能夠反推絕對 token
+數字的關鍵：拿它去對照實測的 transcript 用量做校正。
 
 ### Fable 支援
 
 Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重、各模型表格、儀表板都有 ——
-而且在每一份模型清單裡都排在**第一位**,因為它那個獨立的每週子上限通常是最先用完的。
+而且在每一份模型清單裡都排在**第一位**，因為它那個獨立的每週子上限通常是最先用完的。
 
 ### 共用主機模式
 
-與其在每台筆電上安裝限流器,不如跑**一台**已經登入 Claude 的主機,
+與其在每台筆電上安裝限流器，不如跑**一台**已經登入 Claude 的主機，
 每個人在上面有自己的作業系統帳號。
 
 ```
@@ -785,28 +785,28 @@ Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重
                               身分由 OS uid 推導而來
 ```
 
-**一個 OS 帳號 = 一個儀表板身分**,而且綁定的依據就是 uid 本身,所以在 session
-內部偽造不了。沒有人需要登入 Claude,沒有人碰得到訂閱憑證,而 root 的 session
-會直接跳過限流器,所以你自己的管理工作永遠不會被擋。完整設計與威脅模型:
+**一個 OS 帳號 = 一個儀表板身分**，而且綁定的依據就是 uid 本身，所以在 session
+內部偽造不了。沒有人需要登入 Claude，沒有人碰得到訂閱憑證，而 root 的 session
+會直接跳過限流器，所以你自己的管理工作永遠不會被擋。完整設計與威脅模型：
 **[SHARED-HOST.md](SHARED-HOST.md)**。
 
 ### 零設定連線套件
 
-`make-client.sh` 會為每個使用者提供一個 ZIP,讓非技術背景的使用者完全不需要安裝工具、
-產生金鑰或編輯 SSH 設定。他們解壓縮、雙擊,就能進入遠端主機使用Claude Code:
+`make-client.sh` 會為每個使用者提供一個 ZIP，讓非技術背景的使用者完全不需要安裝工具、
+產生金鑰或編輯 SSH 設定。他們解壓縮、雙擊，就能進入遠端主機使用Claude Code：
 
 | 平台 | 終端機 | VS Code |
 |---|---|---|
 | Windows | `連線Claude.bat` | `VSCode開啟.bat` |
 | macOS | `claude-連線.command` | `VSCode開啟.command` |
 
-每個ZIP裡有自己的 SSH 金鑰對(`0600`),首次執行時會寫入 `~/.ssh/config`,
-並且自己去抓 `cloudflared` —— 或用 `--bundle` 直接內嵌,給網路受限的機器用。
-`--keep-key` 可以只重建啟動器而不換金鑰,這樣已經發出去的套件還是能用。
+每個ZIP裡有自己的 SSH 金鑰對（`0600`），首次執行時會寫入 `~/.ssh/config`，
+並且自己去抓 `cloudflared` —— 或用 `--bundle` 直接內嵌，給網路受限的機器用。
+`--keep-key` 可以只重建啟動器而不換金鑰，這樣已經發出去的套件還是能用。
 
 ### 瀏覽器終端機
 
-`web-terminal.sh` 為每個人跑一份 `ttyd`,各自綁在 loopback 上並降權到那個人的 uid,
+`web-terminal.sh` 為每個人跑一份 `ttyd`，各自綁在 loopback 上並降權到那個人的 uid，
 前面用一個統一的 proxy 透過 Cloudflare Access 驗證。什麼都不用裝 ——
 瀏覽器分頁裡就是 Claude Code。
 
@@ -814,7 +814,7 @@ Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重
 
 | 腳本 | 用途 |
 |---|---|
-| `provision-user.sh` | 建立 OS 帳號、SSH 金鑰檔、root 所有的 token、工作目錄;並植入憑證 |
+| `provision-user.sh` | 建立 OS 帳號、SSH 金鑰檔、root 所有的 token、工作目錄；並植入憑證 |
 | `sync-credentials.sh` | 把主機目前的 Claude 憑證推回給所有帳號 |
 | `start-all.sh` | 重啟後把伺服器、Cloudflare tunnel、sshd、瀏覽器終端機一起拉起來 |
 | `web-terminal.sh` | 瀏覽器終端機的 start / stop / status |
@@ -822,18 +822,18 @@ Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重
 | `make-client.sh` | 建立某個人的連線套件 |
 
 真實主機名稱刻意**不放在這個倉庫裡**。所有腳本都從 `/etc/claude-code/site.env`
-讀取,那個檔案位於工作目錄之外;參見
+讀取，那個檔案位於工作目錄之外；參見
 [SHARED-HOST.md](SHARED-HOST.md#site-configuration)。
 
 ---
 
-## 你要哪一種模式?
+## 你要哪一種模式？
 
 | | **傳統模式** | **共用主機模式** |
 |---|---|---|
 | Claude Code 跑在 | 每個人自己的機器 | 一台共用主機 |
 | 誰登入 Claude | 每個人各自登入 | 沒有人 —— 主機本身已登入 |
-| 每人的安裝方式 | 在他的機器上跑 `setup`,需要 root | 由你建立一個 OS 帳號 |
+| 每人的安裝方式 | 在他的機器上跑 `setup`，需要 root | 由你建立一個 OS 帳號 |
 | 身分依據 | 安裝碼 → 認證 token | OS uid |
 | 適合 | 每人各有筆電、各有訂閱席次的團隊 | 一個訂閱給一群「不該持有其憑證」的人共用 |
 | 設定指南 | 見下方 | **[SHARED-HOST.md](SHARED-HOST.md)** |
@@ -842,7 +842,7 @@ Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重
 
 ---
 
-## 快速開始(傳統模式)
+## 快速開始（傳統模式）
 
 ### 1. 啟動伺服器
 
@@ -857,7 +857,7 @@ docker run -d --name claude-limiter -p 3000:3000 \
   claude-code-limiter
 ```
 
-**Docker Compose 自動 HTTPS**(憑證由 Caddy 處理)
+**Docker Compose 自動 HTTPS**（憑證由 Caddy 處理）
 ```bash
 cd packages/server
 DOMAIN=limiter.yourdomain.com ADMIN_PASSWORD=secret docker compose up -d
@@ -875,12 +875,12 @@ ADMIN_PASSWORD=secret npm run serve
 
 ### 2. 在儀表板新增使用者
 
-開啟 `https://your-server/dashboard`,用管理員密碼登入,然後
+開啟 `https://your-server/dashboard`，用管理員密碼登入，然後
 **Add User** → 設定上限 → 複製安裝碼。
 
 ### 3. 在每台使用者機器上安裝
 
-npm 套件**沒有**以本 fork 的 scope 發布,所以請從 clone 安裝:
+npm 套件**沒有**以本 fork 的 scope 發布，所以請從 clone 安裝：
 
 ```bash
 git clone https://github.com/torrentpien/claude-code-limiter.git
@@ -896,8 +896,8 @@ sudo node packages/cli/bin/cli.js setup \
 <summary>自行發布到 npm(選用)</summary>
 
 如果你想要儀表板複製按鈕顯示的那種較短的
-`npx @your-scope/claude-code-limiter setup …` 形式,請把這兩個套件發布到你自己的
-npm scope,並同步修改 `packages/cli/package.json` 與 `packages/server/package.json`
+`npx @your-scope/claude-code-limiter setup …` 形式，請把這兩個套件發布到你自己的
+npm scope，並同步修改 `packages/cli/package.json` 與 `packages/server/package.json`
 裡的 `name` 欄位。
 
 </details>
@@ -906,7 +906,7 @@ npm scope,並同步修改 `packages/cli/package.json` 與 `packages/server/packa
 
 ## 被擋下來時使用者看到什麼
 
-（以下是程式的實際輸出,為英文）
+（以下是程式的實際輸出，為英文）
 
 ```
 Daily sonnet limit reached for Alice.
@@ -925,14 +925,14 @@ Options:
   Try again later
 ```
 
-被管理員停權時:
+被管理員停權時：
 
 ```
 Your Claude Code access has been revoked by the admin.
 Contact your admin to restore access.
 ```
 
-在某個模型的允許時段之外:
+在某個模型的允許時段之外：
 
 ```
 Opus is only available 9:00 AM - 6:00 PM (Asia/Taipei).
@@ -969,8 +969,8 @@ Current time: 8:15 PM. Try sonnet or haiku instead.
 | Sonnet | 3 點 |
 | Haiku | 1 點 |
 
-每日 100 點的預算可以換成:5 次 Fable、或 10 次 Opus、或 33 次 Sonnet、
-或 100 次 Haiku,也可以任意混搭。在 **Dashboard → Settings** 裡調整。
+每日 100 點的預算可以換成：5 次 Fable、或 10 次 Opus、或 33 次 Sonnet、
+或 100 次 Haiku，也可以任意混搭。在 **Dashboard → Settings** 裡調整。
 
 ### 監督（不管控）
 
@@ -979,21 +979,21 @@ Current time: 8:15 PM. Try sonnet or haiku instead.
 | Prompt 次數 | 每人、每模型、每視窗 | **是** |
 | 點數預算 | 每人、每視窗 | **是** |
 | Token 用量 | 每人、每模型、每回合 | 否 —— 只記錄 |
-| 訂閱計量器 | 整個方案:5h / 每週 / Fable 每週 | 否 —— 只記錄 |
+| 訂閱計量器 | 整個方案：5h / 每週 / Fable 每週 | 否 —— 只記錄 |
 
 ### 管理員控制項
 
 - **即時儀表板** —— 即時用量長條、每人明細、WebSocket 事件流
-- **停權開關** —— 立即撤銷存取權;在傳統模式下還會強制該機器執行
-  `claude auth logout`（在共用主機模式下**刻意不做**,因為那會把整台主機登出）
+- **停權開關** —— 立即撤銷存取權；在傳統模式下還會強制該機器執行
+  `claude auth logout`（在共用主機模式下**刻意不做**，因為那會把整台主機登出）
 - **暫停 / 恢復** —— 暫時停用而不撤銷
-- **設定即時推送** —— 在伺服器端改上限,下一個 prompt 就會生效
+- **設定即時推送** —— 在伺服器端改上限，下一個 prompt 就會生效
 
 ---
 
 ## 運作原理
 
-每個 prompt 會經過四個 hook 事件:
+每個 prompt 會經過四個 hook 事件：
 
 ```
 使用者輸入 prompt
@@ -1027,47 +1027,47 @@ Current time: 8:15 PM. Try sonnet or haiku instead.
 
 **設計決策**
 
-- **管控的單位是「回合」**,不是工具呼叫。一個 prompt 可能觸發 10 個以上的工具
-  呼叫,它仍然只消耗一單位額度。
-- **計量的單位是 token。** 它和次數一起被記錄在每個回合上,這讓成本變得可見,
+- **管控的單位是「回合」**，不是工具呼叫。一個 prompt 可能觸發 10 個以上的工具
+  呼叫，它仍然只消耗一單位額度。
+- **計量的單位是 token。** 它和次數一起被記錄在每個回合上，這讓成本變得可見，
   同時完全不改變「被管控的是什麼」。
 - **Hook 沒有任何 npm 相依** —— 只用 Node.js 內建模組。
-- **本地優先。** 檢查打本地快取,和伺服器的同步在背景進行。
-- **失效即封鎖。** 限流器的檔案不見了,就是拒絕存取。
+- **本地優先。** 檢查打本地快取，和伺服器的同步在背景進行。
+- **失效即封鎖。** 限流器的檔案不見了，就是拒絕存取。
 
 ### 資料庫
 
-`usage_event` 維持**一個回合一列** —— prompt 上限是建立在 `COUNT(*)` 之上的,
-所以不能被稀釋。Token 明細放在獨立的 `token_event` 表,訂閱計量器讀數放在
-`subscription_usage`。Migration 是冪等的,而且只新增可為 NULL 的欄位,
+`usage_event` 維持**一個回合一列** —— prompt 上限是建立在 `COUNT(*)` 之上的，
+所以不能被稀釋。Token 明細放在獨立的 `token_event` 表，訂閱計量器讀數放在
+`subscription_usage`。Migration 是冪等的，而且只新增可為 NULL 的欄位，
 所以既有資料庫可以原地升級。
 
 ---
 
 ## 安全性
 
-唯一的繞過方式是取得機器的 root —— 而任何人有了 root,本來就已經拿得到訂閱憑證了。
+唯一的繞過方式是取得機器的 root —— 而任何人有了 root，本來就已經拿得到訂閱憑證了。
 
 | # | 層級 | 防止 |
 |---|---|---|
-| 1 | **受管設定** | `managed-settings.json` 位於系統目錄;使用者與專案設定都覆蓋不了 |
+| 1 | **受管設定** | `managed-settings.json` 位於系統目錄；使用者與專案設定都覆蓋不了 |
 | 2 | **`allowManagedHooksOnly`** | 使用者自訂 hook 來繞過限流器 |
 | 3 | **OS 檔案權限** | Hook、設定、伺服器檔案由 root 擁有 —— 可讀不可寫 |
-| 4 | **看門狗 daemon** | 每 5 分鐘執行,SHA-256 完整性檢查,從 root 專屬備份還原被竄改的檔案 |
+| 4 | **看門狗 daemon** | 每 5 分鐘執行，SHA-256 完整性檢查，從 root 專屬備份還原被竄改的檔案 |
 | 5 | **伺服器端記錄** | 刪掉本地用量檔案來歸零計數 |
 | 6 | **停權開關** | 撤銷後仍繼續使用 |
-| 7 | **每人專屬認證 token** | 冒充他人;token 檔案由 root 擁有 |
+| 7 | **每人專屬認證 token** | 冒充他人；token 檔案由 root 擁有 |
 | 8 | **失效即封鎖** | 設定缺失被當成「無限制」 |
 
-共用主機模式再加三層:身分由 uid 推導（因此非 root 的 `CLAUDE_LIMITER_*`
+共用主機模式再加三層：身分由 uid 推導（因此非 root 的 `CLAUDE_LIMITER_*`
 環境變數一律被忽略）、`authorized_keys` 由 root 擁有且不在任何人的家目錄裡、
 以及每個帳號各自的檔案權限。參見
 [SHARED-HOST.md](SHARED-HOST.md#isolation-model)。
 
-**已知限制。** 在共用主機模式下,每個帳號都讀得到共用的
-`~/.claude/.credentials.json`,因為 Claude Code 必須讀它。有人可以把它複製走,
+**已知限制。** 在共用主機模式下，每個帳號都讀得到共用的
+`~/.claude/.credentials.json`，因為 Claude Code 必須讀它。有人可以把它複製走，
 在這台主機之外、限流器管不到的地方使用這個訂閱。這是「共用主機登入」這個做法的
-本質限制;能做的只有信任,以及必要時更換登入。
+本質限制；能做的只有信任，以及必要時更換登入。
 
 ### 檔案位置
 
@@ -1102,7 +1102,7 @@ Windows: C:\Program Files\ClaudeCode\
 
 ### 限制規則
 
-在儀表板上為每個人設定。規則會疊加,最嚴格的那條生效。
+在儀表板上為每個人設定。規則會疊加，最嚴格的那條生效。
 
 ```json
 { "type": "per_model", "model": "opus", "window": "sliding_24h", "value": 5 }
@@ -1118,7 +1118,7 @@ Windows: C:\Program Files\ClaudeCode\
 
 ### 判定順序
 
-每個 prompt 都會檢查所有規則,第一個拒絕就生效。
+每個 prompt 都會檢查所有規則，第一個拒絕就生效。
 
 ```
 1. 已停權或暫停?           → 擋下
@@ -1135,13 +1135,13 @@ Windows: C:\Program Files\ClaudeCode\
 | `ADMIN_PASSWORD` | 首次啟動需要 | — | 儀表板登入密碼 |
 | `PORT` | 否 | `3000` | 監聽埠 |
 | `JWT_SECRET` | 否 | 自動產生 | 設定它可讓管理員 session 在重啟後保留 |
-| `DATA_DIR` | 否 | `./data`,Docker 下為 `/data` | SQLite 位置 |
+| `DATA_DIR` | 否 | `./data`，Docker 下為 `/data` | SQLite 位置 |
 
 ---
 
 ## CLI 指令
 
-從 clone 執行（見 [快速開始](#3-在每台使用者機器上安裝)）:
+從 clone 執行（見 [快速開始](#3-在每台使用者機器上安裝)）：
 
 ```bash
 sudo node packages/cli/bin/cli.js setup --code <CODE> --server <URL>
@@ -1150,7 +1150,7 @@ sudo node packages/cli/bin/cli.js sync
 sudo node packages/cli/bin/cli.js uninstall
 ```
 
-`setup` 會安裝 hook、受管設定與看門狗,然後向伺服器註冊。因為要寫入系統保護目錄,
+`setup` 會安裝 hook、受管設定與看門狗，然後向伺服器註冊。因為要寫入系統保護目錄，
 所以需要 `sudo`。
 
 ```
@@ -1178,33 +1178,33 @@ sudo node packages/cli/bin/cli.js uninstall
 
 ## 常見問題
 
-**使用者有辦法繞過嗎?**
-沒有 root 就不行。Hook 從系統保護目錄執行、檔案由 root 擁有,
-`allowManagedHooksOnly` 擋掉使用者自訂的 hook,看門狗每 5 分鐘還原被竄改的檔案,
-而且就算全部刪光,結果是失效即封鎖。
+**使用者有辦法繞過嗎？**
+沒有 root 就不行。Hook 從系統保護目錄執行、檔案由 root 擁有，
+`allowManagedHooksOnly` 擋掉使用者自訂的 hook，看門狗每 5 分鐘還原被竄改的檔案，
+而且就算全部刪光，結果是失效即封鎖。
 
-**刪掉本地用量檔案可以讓額度歸零嗎?**
-不行。用量記錄在伺服器端,本地檔案只是快取。
+**刪掉本地用量檔案可以讓額度歸零嗎？**
+不行。用量記錄在伺服器端，本地檔案只是快取。
 
-**這會影響瀏覽器上的 Claude.ai 嗎?**
+**這會影響瀏覽器上的 Claude.ai 嗎？**
 不會。只影響 Claude Code。
 
-**伺服器掛掉會怎樣?**
-Hook 會退回使用快取的上限與用量。限制仍然生效,伺服器回來後會自動對帳。
-如果連快取都沒有,就拒絕。
+**伺服器掛掉會怎樣？**
+Hook 會退回使用快取的上限與用量。限制仍然生效，伺服器回來後會自動對帳。
+如果連快取都沒有，就拒絕。
 
-**它算的是工具呼叫還是 prompt?**
-Prompt(回合)。一個 prompt 就是一單位額度,不管它做了多少事。
-Token 另外記錄,所以你看得出這中間的差距。
+**它算的是工具呼叫還是 prompt？**
+Prompt（回合）。一個 prompt 就是一單位額度，不管它做了多少事。
+Token 另外記錄，所以你看得出這中間的差距。
 
-**自動續寫（auto-continue）會算成多個回合嗎?**
-會。每一次續寫都會觸發自己的 `Stop` 事件,也確實消耗了真實的運算量。
+**自動續寫（auto-continue）會算成多個回合嗎？**
+會。每一次續寫都會觸發自己的 `Stop` 事件，也確實消耗了真實的運算量。
 設定上限時要把這件事考慮進去。
 
-**Token 上限會被強制執行嗎?**
+**Token 上限會被強制執行嗎？**
 不會 —— token 用量只會被記錄和顯示。真正管控的是 prompt 次數與點數。
 
-**一台伺服器可以同時管兩個訂閱嗎?**
+**一台伺服器可以同時管兩個訂閱嗎？**
 目前不行。一個伺服器實例綁定一組 Claude 憑證。
 
 ---
@@ -1246,8 +1246,8 @@ claude-code-limiter/
 ```
 
 > **你看到的儀表板是 `packages/server/src/dashboard/`** —— 純 HTML、CSS、
-> JavaScript,直接服務,沒有建置步驟。`packages/dashboard/` 裡是一份沒有建置的
-> React 改寫版,**沒有**被接上;改它不會有任何效果。改完原生版本後記得強制重新整理。
+> JavaScript，直接服務，沒有建置步驟。`packages/dashboard/` 裡是一份沒有建置的
+> React 改寫版，**沒有**被接上；改它不會有任何效果。改完原生版本後記得強制重新整理。
 
 ---
 
@@ -1260,14 +1260,14 @@ npm install
 ADMIN_PASSWORD=secret npm run serve
 ```
 
-> **目前沒有測試套件。** `npm test` 只會印出 `TODO`,而 `tests/` 底下是從上游
-> 繼承的骨架,裡面沒有任何斷言。請對著實際運行的伺服器驗證你的改動。
+> **目前沒有測試套件。** `npm test` 只會印出 `TODO`，而 `tests/` 底下是從上游
+> 繼承的骨架，裡面沒有任何斷言。請對著實際運行的伺服器驗證你的改動。
 
 **開發準則**
 
 - `packages/cli/src/hook.js` 必須維持**零相依** —— 只用 Node.js 內建模組。
 - 伺服器是 Express + better-sqlite3 + ws。保持簡單。
-- 被服務的儀表板是原生 HTML/CSS/JS —— 沒有建置步驟,沒有框架。
+- 被服務的儀表板是原生 HTML/CSS/JS —— 沒有建置步驟，沒有框架。
 - **絕對不要 commit `dist/`** —— 連線套件裡有私鑰。
 - **絕對不要 commit 真實主機名稱** —— 它們該放在 `/etc/claude-code/site.env`。
 
@@ -1277,18 +1277,18 @@ ADMIN_PASSWORD=secret npm run serve
 
 本專案是
 **[howincodes/claude-code-limiter](https://github.com/howincodes/claude-code-limiter)**
-的衍生作品,原作者為 [howincodes](https://github.com/howincodes) 與
-[farisbasha](https://github.com/farisbasha),以 MIT 授權釋出。
+的衍生作品，原作者為 [howincodes](https://github.com/howincodes) 與
+[farisbasha](https://github.com/farisbasha)，以 MIT 授權釋出。
 
-原始構想及基礎程式都是原作者的:受管 hook 架構、四事件關卡、失效即封鎖的設計、
-限制規則引擎、點數預算模型、看門狗,以及儀表板。上游完整的 commit 歷史都保留在這個
+原始構想及基礎程式都是原作者的：受管 hook 架構、四事件關卡、失效即封鎖的設計、
+限制規則引擎、點數預算模型、看門狗，以及儀表板。上游完整的 commit 歷史都保留在這個
 repo中 —— `git log` 可以清楚看出哪些工作是誰做的。
 
 本 fork 加入了共用主機部署、以 transcript 為基礎的 token 計量、訂閱上限監控、
-Fable 支援、連線套件,以及瀏覽器終端機。本專案獨立維護,與上游專案並無隸屬關係;
+Fable 支援、連線套件，以及瀏覽器終端機。本專案獨立維護，與上游專案並無隸屬關係；
 請不要把源自這裡的問題送給上游的維護者。
 
-要追蹤上游:
+要追蹤上游：
 
 ```bash
 git remote add upstream https://github.com/howincodes/claude-code-limiter.git
