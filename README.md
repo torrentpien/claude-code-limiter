@@ -677,8 +677,7 @@ git fetch upstream
 <p align="center">
   <h1 align="center">claude-code-limiter</h1>
   <p align="center">
-    讓一個 Claude Code 訂閱給整個團隊共用 —— 每個人有各自的額度上限、
-    真實的 token 計量,以及訂閱本身還剩多少的即時檢視。
+    讓研究團隊或修課學生共用一個Claude Code帳號的額度，並且能管理每個使用者的使用額度。
   </p>
 </p>
 
@@ -687,14 +686,14 @@ git fetch upstream
 </p>
 
 <p align="center">
-  <b>一個訂閱。多人使用。每個人都分得公平。</b>
+  <b>一個帳號，多組使用</b>
 </p>
 
 > **出處。** 本專案源自
 > **[howincodes/claude-code-limiter](https://github.com/howincodes/claude-code-limiter)**
 > 的 fork,作者為 [howincodes](https://github.com/howincodes) 與
-> [farisbasha](https://github.com/farisbasha),採 MIT 授權。以 prompt 次數計量的
-> 限流器、hook 架構與儀表板都是他們的設計,至今仍是這份程式碼的基礎。本專案在其上
+> [farisbasha](https://github.com/farisbasha),採 MIT 授權。目前採取以指令次數計量的
+> 限流器、hook 架構與儀表板都是原來的設計，本專案修正了
 > 加入了共用主機部署、token 層級的計量,以及訂閱上限監控 —— 詳見
 > [這個 fork 加了什麼](#這個-fork-加了什麼) 與 [致謝](#致謝)。
 
@@ -706,17 +705,15 @@ git fetch upstream
 
 ## 問題在哪
 
-你付錢訂了 Claude Code Max,幾個人一起用。
+你付錢訂了 Claude Code Max,讓幾個人一起用。
 
-然後某個人發現了 Opus,一小時內送出 50 個 prompt。整個訂閱當天剩下的時間全部被
-限流,其他人什麼都做不了。
+然後某個人使用Fable,短時間內將token全部耗光,其他人什麼都做不了。
 
 Claude Code **沒有任何內建的用量管控**。沒有個人上限、沒有配額,也看不到誰用了多少。
-你在盲飛,而帳單是你在付。
 
 ## 這個專案做什麼
 
-一層放在「使用者」和「共用訂閱」之間的用量管控:
+對共用Claude Code帳號的用量管控:
 
 - **個人額度** —— 每人每模型的每日 / 每週 / 每月 / 滾動 24 小時上限
 - **點數預算** —— 一份跨所有模型的預算,每個人自己決定怎麼花
@@ -726,16 +723,14 @@ Claude Code **沒有任何內建的用量管控**。沒有個人上限、沒有�
 - **停權開關** —— 遠端即時撤銷存取權
 
 每台機器上有一個系統層級的 hook,在每個 prompt 送出時檢查上限,並和你自架的伺服器
-通訊。使用者沒有機器的 root 權限就繞不過去。
+確認額度。
 
 ---
 
 ## 這個 fork 加了什麼
 
-上游計算的是 **prompt 次數**。就公平分配而言這個單位是對的,但它回答不了
-「我的訂閱還剩多少?」,也回答不了「到底是誰燒掉的?」—— 一個 prompt 的成本可以是
-另一個的一千倍。以下這些補上了這個缺口,並且讓整套東西可以部署在一台共用主機上,
-而不是每個人的筆電上。
+原始專案計算的是 **prompt 次數**。本專案目前還計算目前訂閱還剩多少及是誰及用什麼模型燒掉的，
+並且允許使用者透過終端機或VS Code連入使用。
 
 ### 真實的 token 計量
 
@@ -757,7 +752,7 @@ Hook 會讀取 Claude Code 自己的對話紀錄(transcript),按模型、按回�
 
 ### 訂閱上限監控
 
-背景輪詢程式讀取 Claude Code CLI 執行 `/status` 時用的同一個 OAuth 用量端點,
+背景程式讀取 Claude Code CLI 執行 `/status` 時用的同一個 OAuth 用量,
 記錄你的方案實際上被三個什麼樣的計量器判定:
 
 | 計量器 | 內容 |
@@ -766,13 +761,13 @@ Hook 會讀取 Claude Code 自己的對話紀錄(transcript),按模型、按回�
 | **Weekly (all models)** | 每週上限,通常是最先卡住的那個 |
 | **Fable (weekly)** | Fable 專屬的每週子上限 |
 
-這個端點**只回傳百分比** —— 金額欄位一律是 null —— 所以儀表板顯示的是百分比、
+計算**只回傳百分比** —— 金額欄位一律是 null —— 所以儀表板顯示的是百分比、
 嚴重程度,以及距離重置的時間。歷史紀錄會保留下來,這正是後續能夠反推絕對 token
 數字的關鍵:拿它去對照實測的 transcript 用量做校正。
 
 ### Fable 支援
 
-Fable 在整套系統裡是一等公民 —— 限制規則、點數權重、各模型表格、儀表板都有 ——
+Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重、各模型表格、儀表板都有 ——
 而且在每一份模型清單裡都排在**第一位**,因為它那個獨立的每週子上限通常是最先用完的。
 
 ### 共用主機模式
@@ -795,19 +790,19 @@ Fable 在整套系統裡是一等公民 —— 限制規則、點數權重、各
 會直接跳過限流器,所以你自己的管理工作永遠不會被擋。完整設計與威脅模型:
 **[SHARED-HOST.md](SHARED-HOST.md)**。
 
-### 零設定連線包
+### 零設定連線套件
 
-`make-client.sh` 會為每個人打包一個 ZIP,讓非技術背景的使用者完全不需要安裝工具、
-產生金鑰或編輯 SSH 設定。他們解壓縮、雙擊,就進去了:
+`make-client.sh` 會為每個使用者提供一個 ZIP,讓非技術背景的使用者完全不需要安裝工具、
+產生金鑰或編輯 SSH 設定。他們解壓縮、雙擊,就能進入遠端主機使用Claude Code:
 
 | 平台 | 終端機 | VS Code |
 |---|---|---|
 | Windows | `連線Claude.bat` | `VSCode開啟.bat` |
 | macOS | `claude-連線.command` | `VSCode開啟.command` |
 
-每個包裡有自己的 SSH 金鑰對(`0600`),首次執行時會寫入 `~/.ssh/config`,
+每個ZIP裡有自己的 SSH 金鑰對(`0600`),首次執行時會寫入 `~/.ssh/config`,
 並且自己去抓 `cloudflared` —— 或用 `--bundle` 直接內嵌,給網路受限的機器用。
-`--keep-key` 可以只重建啟動器而不換金鑰,這樣已經發出去的包還是能用。
+`--keep-key` 可以只重建啟動器而不換金鑰,這樣已經發出去的套件還是能用。
 
 ### 瀏覽器終端機
 
@@ -1285,9 +1280,9 @@ ADMIN_PASSWORD=secret npm run serve
 的衍生作品,原作者為 [howincodes](https://github.com/howincodes) 與
 [farisbasha](https://github.com/farisbasha),以 MIT 授權釋出。
 
-原始構想與這一切的基礎都是他們的:受管 hook 架構、四事件關卡、失效即封鎖的設計、
+原始構想及基礎程式都是原作者的:受管 hook 架構、四事件關卡、失效即封鎖的設計、
 限制規則引擎、點數預算模型、看門狗,以及儀表板。上游完整的 commit 歷史都保留在這個
-倉庫裡 —— `git log` 可以清楚看出哪些工作是誰做的。
+repo中 —— `git log` 可以清楚看出哪些工作是誰做的。
 
 本 fork 加入了共用主機部署、以 transcript 為基礎的 token 計量、訂閱上限監控、
 Fable 支援、連線包,以及瀏覽器終端機。本專案獨立維護,與上游專案並無隸屬關係;
@@ -1308,7 +1303,3 @@ git fetch upstream
 - 修改部分 © 2026 torrentpien —— <https://github.com/torrentpien/claude-code-limiter>
 
 ---
-
-<p align="center">
-  <b>別再盲目共用。開始公平分配。</b>
-</p>
