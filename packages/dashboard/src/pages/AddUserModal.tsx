@@ -101,7 +101,7 @@ export function AddUserModal({ open, onClose, onCreated, showToast }: AddUserMod
       onCreated();
 
       const serverUrl = `${location.protocol}//${location.host}`;
-      const cmd = `sudo npx @howincodes/claude-code-limiter setup --code ${result.install_code} --server ${serverUrl}`;
+      const cmd = `sudo claude-code-limiter setup --code ${result.install_code} --server ${serverUrl}`;
       setInstallCmd(cmd);
       setShowInstall(true);
     } catch (err) {

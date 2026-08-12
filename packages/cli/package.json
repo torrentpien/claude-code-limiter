@@ -1,7 +1,7 @@
 {
-  "name": "@howincodes/claude-code-limiter",
-  "version": "1.3.0",
-  "description": "Per-user rate limits for Claude Code — share one subscription fairly",
+  "name": "@torrentpien/claude-code-limiter",
+  "version": "1.4.0",
+  "description": "Per-user rate limits and token accounting for Claude Code — share one subscription fairly",
   "bin": {
     "claude-code-limiter": "./bin/cli.js"
   },
@@ -15,9 +15,10 @@
     "node": ">=18.0.0"
   },
   "license": "MIT",
-  "author": "howincodes",
+  "author": "torrentpien",
   "contributors": [
-    "farisbasha"
+    "howincodes (original author of howincodes/claude-code-limiter)",
+    "farisbasha (original author of howincodes/claude-code-limiter)"
   ],
   "keywords": [
     "claude",
@@ -26,12 +27,13 @@
     "hooks",
     "managed-settings",
     "usage-limits",
-    "quota"
+    "quota",
+    "token-accounting"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/howincodes/claude-code-limiter"
+    "url": "https://github.com/torrentpien/claude-code-limiter"
   },
-  "homepage": "https://github.com/howincodes/claude-code-limiter#readme",
-  "bugs": "https://github.com/howincodes/claude-code-limiter/issues"
+  "homepage": "https://github.com/torrentpien/claude-code-limiter#readme",
+  "bugs": "https://github.com/torrentpien/claude-code-limiter/issues"
 }

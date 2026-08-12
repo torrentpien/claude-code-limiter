@@ -1,15 +1,16 @@
 {
-  "name": "@howincodes/claude-code-limiter-server",
-  "version": "1.3.0",
-  "description": "Dashboard server for claude-code-limiter",
+  "name": "@torrentpien/claude-code-limiter-server",
+  "version": "1.4.0",
+  "description": "Dashboard server for claude-code-limiter — quotas, token accounting, and subscription monitoring",
   "main": "src/server/index.js",
   "bin": { "claude-limiter-server": "./bin/server.js" },
   "scripts": { "start": "node bin/server.js" },
   "files": ["bin/", "src/", "Dockerfile", "docker-compose.yml", "Caddyfile", "README.md", "LICENSE"],
   "engines": { "node": ">=18.0.0" },
-  "author": "howincodes",
+  "author": "torrentpien",
   "contributors": [
-    "farisbasha"
+    "howincodes (original author of howincodes/claude-code-limiter)",
+    "farisbasha (original author of howincodes/claude-code-limiter)"
   ],
   "dependencies": {
     "express": "^4.21.0",
@@ -21,7 +22,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/howincodes/claude-code-limiter"
+    "url": "https://github.com/torrentpien/claude-code-limiter"
   },
   "license": "MIT"
 }

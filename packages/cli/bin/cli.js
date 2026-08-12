@@ -38,22 +38,27 @@ ${c.bold('OPTIONS')}
 
 ${c.bold('EXAMPLES')}
   ${c.dim('# Install on a user\'s machine (admin gives them the code)')}
-  sudo npx @howincodes/claude-code-limiter setup --code CLM-alice-a8f3e2 --server https://your-server:3000
+  sudo claude-code-limiter setup --code CLM-alice-a8f3e2 --server https://your-server:3000
 
   ${c.dim('# Check current usage')}
-  npx @howincodes/claude-code-limiter status
+  claude-code-limiter status
 
   ${c.dim('# Force re-sync config from server')}
-  sudo npx @howincodes/claude-code-limiter sync
+  sudo claude-code-limiter sync
 
   ${c.dim('# Remove the limiter from this machine')}
-  sudo npx @howincodes/claude-code-limiter uninstall
+  sudo claude-code-limiter uninstall
 
   ${c.dim('# Start the server')}
-  npx @howincodes/claude-code-limiter serve --port 3000
+  claude-code-limiter serve --port 3000
 
   ${c.dim('# Start the server via Docker')}
   docker run -p 3000:3000 -v data:/data -e ADMIN_PASSWORD=xxx claude-code-limiter
+
+${c.bold('RUNNING FROM A CLONE')}
+  ${c.dim('This package is not published to npm. From a checkout, replace')}
+  ${c.dim('"claude-code-limiter" above with "node packages/cli/bin/cli.js", or run')}
+  ${c.dim('"npm link" inside packages/cli once to put it on your PATH.')}
 `.trim();
 
 // ---- Argument parsing (no external deps, just process.argv) ----
@@ -118,11 +123,11 @@ async function main() {
     case 'setup': {
       if (!code) {
         die('--code is required for setup.\n'
-          + c.dim('Usage: sudo npx @howincodes/claude-code-limiter setup --code <CODE> --server <URL>'));
+          + c.dim('Usage: sudo claude-code-limiter setup --code <CODE> --server <URL>'));
       }
       if (!server) {
         die('--server is required for setup.\n'
-          + c.dim('Usage: sudo npx @howincodes/claude-code-limiter setup --code <CODE> --server <URL>'));
+          + c.dim('Usage: sudo claude-code-limiter setup --code <CODE> --server <URL>'));
       }
       const installer = require('../src/installer.js');
       await installer.setup({ code, server, skipConfirm });

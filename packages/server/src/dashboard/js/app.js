@@ -1443,7 +1443,10 @@
         // Show install command modal
         var installCode = result.install_code;
         var serverUrl = location.protocol + '//' + location.host;
-        var installCmd = 'sudo npx @howincodes/claude-code-limiter setup --code ' + installCode + ' --server ' + serverUrl;
+        // Not the npx form: this fork is not published to npm, and the upstream
+        // package under the old scope would install a hook without token
+        // accounting -- silently the wrong software. See the hint below.
+        var installCmd = 'sudo claude-code-limiter setup --code ' + installCode + ' --server ' + serverUrl;
 
         var installHtml = '';
         installHtml += '<div class="modal-header"><h3>Install Command</h3><button class="modal-close" data-action="close-modal">&times;</button></div>';
@@ -1454,6 +1457,8 @@
         installHtml += '<button class="btn btn-sm btn-primary" data-action="copy-install" data-command="' + escapeHtml(installCmd) + '">Copy</button>';
         installHtml += '</div>';
         installHtml += '<p class="form-hint mt-2">This code can only be used once. Generate a new one from the user detail page if needed.</p>';
+        installHtml += '<p class="form-hint mt-1">Not on their PATH yet? From a clone of the repo, run '
+          + '<code>sudo node packages/cli/bin/cli.js setup ...</code> with the same options.</p>';
         installHtml += '</div>';
         installHtml += '<div class="modal-footer"><button class="btn btn-primary" data-action="close-modal">Done</button></div>';
 
