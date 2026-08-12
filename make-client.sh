@@ -280,33 +280,182 @@ if errorlevel 1 pause
 BAT
 
 # --- 4. macOS / Linux launcher --------------------------------------------------
-cat > "$STAGE/claude-連線.command" <<SH
+# macOS/Linux counterpart to connect.ps1: one script with a --vscode switch,
+# fronted by two thin .command wrappers, so the two entry points can't drift.
+# Must stay BOM-less -- a BOM before the shebang stops it being executable.
+cat > "$STAGE/connect.sh" <<SH
 #!/bin/bash
-cd "\$(dirname "\$0")"
-export PATH="\$PWD:\$PATH"
-echo "  Claude  ($NAME)"
+set -u
+
+here="\$(cd "\$(dirname "\$0")" && pwd)"
+cd "\$here"
+export PATH="\$here:\$PATH"
+
+SSH_HOST_NAME='$SSH_HOST'
+USER_NAME='$NAME'
+HOST_ALIAS='claude-$NAME'
+REMOTE_DIR='/workspace/users/$NAME'
+
+VSCODE=0
+[ "\${1:-}" = "--vscode" ] && VSCODE=1
+
 echo
-if ! command -v cloudflared >/dev/null 2>&1 && [ ! -x ./cloudflared ]; then
+echo "  ==============================="
+echo "     Claude   ($NAME)"
+echo "  ==============================="
+echo
+
+# A ZIP opened from a browser is quarantined by Gatekeeper, which also blocks
+# the cloudflared we unpack next to it. Clearing the package folder is safe --
+# the user already chose to run this.
+xattr -dr com.apple.quarantine "\$here" 2>/dev/null || true
+
+# --- cloudflared ----------------------------------------------------------------
+# VS Code launches ssh from its own working directory, so ProxyCommand needs an
+# absolute path -- resolve one here rather than relying on PATH.
+CF_BIN=""
+if [ -x "\$here/cloudflared" ]; then
+  CF_BIN="\$here/cloudflared"
+elif command -v cloudflared >/dev/null 2>&1; then
+  CF_BIN="\$(command -v cloudflared)"
+else
   echo "  首次啟動，正在下載連線元件..."
-  OS=\$(uname -s | tr 'A-Z' 'a-z'); ARCH=\$(uname -m)
-  case "\$ARCH" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; esac
-  curl -fsSL -o ./cloudflared \\
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-\${OS}-\${ARCH}" || {
-      echo "  [!] 下載失敗，請確認網路連線。"; read -r -p "按 Enter 關閉"; exit 1; }
-  chmod +x ./cloudflared
+  OS=\$(uname -s | tr 'A-Z' 'a-z')
+  ARCH=\$(uname -m)
+  case "\$ARCH" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; esac
+  BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
+  ok=0
+  if [ "\$OS" = "darwin" ]; then
+    # macOS ships ONLY a .tgz -- the bare binary URL used by other platforms
+    # 404s here, which previously surfaced as a misleading network error.
+    if curl -fsSL -o "\$here/cf.tgz" "\$BASE/cloudflared-darwin-\${ARCH}.tgz" &&
+       tar -xzf "\$here/cf.tgz" -C "\$here" cloudflared; then
+      ok=1
+    fi
+    rm -f "\$here/cf.tgz"
+  else
+    curl -fsSL -o "\$here/cloudflared" "\$BASE/cloudflared-\${OS}-\${ARCH}" && ok=1
+  fi
+  if [ "\$ok" != "1" ]; then
+    echo "  [!] 下載連線元件失敗。"
+    echo "      請確認可以連上 github.com，或先自行安裝 cloudflared："
+    echo "        brew install cloudflared"
+    read -r -p "  按 Enter 關閉"
+    exit 1
+  fi
+  chmod +x "\$here/cloudflared"
+  CF_BIN="\$here/cloudflared"
+  echo "  下載完成。"
+  echo
 fi
-chmod 600 id_ed25519
+
+# Unzipping leaves the key with the folder's permissions; ssh refuses a key
+# others can read, so tighten it every run.
+chmod 600 "\$here/id_ed25519" 2>/dev/null || true
+
+# --- Register a Host entry in ~/.ssh/config -------------------------------------
+# VS Code Remote-SSH can only use hosts defined there. Rewritten every launch so
+# moving the folder fixes itself; paths are absolute and quoted because the
+# package may sit in a directory with spaces.
+update_ssh_config() {
+  mkdir -p "\$HOME/.ssh" && chmod 700 "\$HOME/.ssh"
+  cfg="\$HOME/.ssh/config"
+  begin="# >>> claude-code-limiter: \$HOST_ALIAS >>>"
+  end="# <<< claude-code-limiter: \$HOST_ALIAS <<<"
+  [ -f "\$cfg" ] || : > "\$cfg"
+
+  # Drop any previous block for this alias, keeping the user's own entries.
+  awk -v b="\$begin" -v e="\$end" '
+    \$0 == b { skip = 1 }
+    !skip    { print }
+    \$0 == e { skip = 0 }
+  ' "\$cfg" > "\$cfg.claude.tmp" || return 1
+
+  {
+    sed -e :a -e '/^\\n*\$/{\$d;N;};/\\n\$/ba' "\$cfg.claude.tmp"
+    printf '\\n%s\\n' "\$begin"
+    printf 'Host %s\\n' "\$HOST_ALIAS"
+    printf '    HostName %s\\n' "\$SSH_HOST_NAME"
+    printf '    User %s\\n' "\$USER_NAME"
+    printf '    IdentityFile "%s"\\n' "\$here/id_ed25519"
+    printf '    IdentitiesOnly yes\\n'
+    printf '    UserKnownHostsFile "%s"\\n' "\$here/known_hosts"
+    printf '    StrictHostKeyChecking accept-new\\n'
+    printf '    ProxyCommand "%s" access ssh --hostname %s\\n' "\$CF_BIN" "\$SSH_HOST_NAME"
+    printf '    ServerAliveInterval 30\\n'
+    printf '%s\\n' "\$end"
+  } > "\$cfg.claude.new" && mv "\$cfg.claude.new" "\$cfg"
+  rm -f "\$cfg.claude.tmp"
+  chmod 600 "\$cfg"
+}
+update_ssh_config || echo "  [!] 無法更新 SSH 設定檔，VS Code 模式可能無法使用。"
+
+# --- VS Code mode ---------------------------------------------------------------
+if [ "\$VSCODE" = "1" ]; then
+  CODE=""
+  if command -v code >/dev/null 2>&1; then
+    CODE="\$(command -v code)"
+  else
+    for p in \\
+      "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \\
+      "\$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
+      [ -x "\$p" ] && CODE="\$p" && break
+    done
+  fi
+  if [ -z "\$CODE" ]; then
+    echo "  [!] 找不到 VS Code。"
+    echo
+    echo "      請先到 https://code.visualstudio.com 安裝 VS Code，"
+    echo "      然後再試一次。"
+    echo
+    read -r -p "  按 Enter 關閉"
+    exit 1
+  fi
+
+  echo "  檢查 Remote-SSH 擴充套件..."
+  if ! "\$CODE" --list-extensions 2>/dev/null | grep -qi '^ms-vscode-remote.remote-ssh\$'; then
+    echo "  正在安裝 Remote-SSH 擴充套件，請稍候..."
+    "\$CODE" --install-extension ms-vscode-remote.remote-ssh --force >/dev/null 2>&1 ||
+      echo "  (擴充套件安裝失敗，請在 VS Code 內手動安裝 Remote-SSH)"
+  fi
+
+  echo
+  echo "  正在用 VS Code 開啟 \$REMOTE_DIR ..."
+  echo "  第一次連線 VS Code 需要在遠端安裝元件，可能要等 1 到 2 分鐘。"
+  echo
+  "\$CODE" --remote "ssh-remote+\$HOST_ALIAS" "\$REMOTE_DIR"
+  echo "  已送出開啟指令。若 VS Code 沒有反應，請看它右下角的通知。"
+  echo
+  read -r -p "  按 Enter 關閉這個視窗（不會關掉 VS Code）"
+  exit 0
+fi
+
+# --- Terminal mode --------------------------------------------------------------
 echo "  連線中..."
-ssh -i id_ed25519 \\
-    -o "ProxyCommand=cloudflared access ssh --hostname $SSH_HOST" \\
+ssh -i "\$here/id_ed25519" \\
+    -o "ProxyCommand=\\"\$CF_BIN\\" access ssh --hostname \$SSH_HOST_NAME" \\
+    -o IdentitiesOnly=yes \\
     -o StrictHostKeyChecking=accept-new \\
-    -o UserKnownHostsFile=known_hosts \\
+    -o UserKnownHostsFile="\$here/known_hosts" \\
     -o ConnectTimeout=30 \\
-    -t $NAME@$SSH_HOST
+    -o ServerAliveInterval=30 \\
+    -t "\$USER_NAME@\$SSH_HOST_NAME"
 echo
 read -r -p "已離開 Claude，按 Enter 關閉。"
 SH
+chmod +x "$STAGE/connect.sh"
+
+cat > "$STAGE/claude-連線.command" <<'SH'
+#!/bin/bash
+exec "$(cd "$(dirname "$0")" && pwd)/connect.sh"
+SH
 chmod +x "$STAGE/claude-連線.command"
+
+cat > "$STAGE/VSCode開啟.command" <<'SH'
+#!/bin/bash
+exec "$(cd "$(dirname "$0")" && pwd)/connect.sh" --vscode
+SH
+chmod +x "$STAGE/VSCode開啟.command"
 
 # --- 5. Instructions ------------------------------------------------------------
 # BOM so Notepad on Traditional Chinese Windows doesn't read this as Big5.
@@ -339,9 +488,66 @@ Claude 連線包 — $NAME
   在 VS Code 裡按「終端機 > 新增終端機」就能輸入 claude。
 
 【Mac】
-  雙擊「claude-連線.command」
-  若出現「無法打開，因為來自未識別的開發者」，
-  請按住 Control 再點一次，選「打開」。
+  1. 把這個資料夾整個解壓縮到桌面
+  2. ★ 先做下面「第一次使用要先解除封鎖」這一步 ★
+  3. 雙擊「claude-連線.command」
+  4. 連上後輸入  claude  就開始使用
+
+★ 第一次使用要先解除封鎖（只要做一次）
+
+  從網路下載的檔案會被 macOS 封鎖，畫面會出現
+  「Apple could not verify ...」或
+  「無法打開，因為來自未識別的開發者」。
+
+  【做法一：最快，各版本都適用】
+    1. 打開「終端機」（Terminal）
+       ─ 按 Command + 空白鍵，輸入「終端機」再按 Enter
+
+    2. 輸入 cd 和一個空格（就這三個字元，先不要按 Enter）：
+
+         cd
+
+    3. 把解壓縮後的整個資料夾，用滑鼠拖進終端機視窗
+       路徑會自動出現在 cd 後面，這時才按 Enter
+
+    4. 再輸入下面這一行，然後按 Enter：
+
+         xattr -cr .
+
+       最後面那個小數點是指令的一部分，不要漏掉。
+       沒有任何訊息就是成功了。
+
+    5. 回到 Finder，雙擊「claude-連線.command」
+
+    ※ 第 2、3 步如果不小心提早按了 Enter，畫面不會有錯，
+      重做一次第 2 步就好。
+
+  【做法一之二：上面還是不行的話】
+    在同一個終端機視窗（已經 cd 進資料夾了）輸入：
+
+         bash ./connect.sh
+
+    這樣是直接執行，不會經過 macOS 的封鎖檢查。
+
+  【做法二：不想用終端機】
+    1. 先雙擊「claude-連線.command」讓它被擋一次
+    2. 打開「系統設定」→「隱私權與安全性」
+    3. 往下捲到「安全性」，會看到
+       「已阻擋 claude-連線.command」
+    4. 按旁邊的「仍要打開」，再雙擊一次
+
+  註：macOS 15 (Sequoia) 之後，「按住 Control 再點一次」
+      已經不能用了，請用上面兩種做法。
+
+【Mac 用 VS Code 開啟】
+  雙擊「VSCode開啟.command」
+  （如果上面的「解除封鎖」是用做法一做的，
+    這個檔案已經一起解除了，直接雙擊即可）
+
+  它會自動設定好連線、安裝需要的擴充套件，
+  然後用 VS Code 直接打開你的遠端目錄。
+  之後也可以在 VS Code 左下角的「><」按鈕
+  選擇 claude-$NAME 連線。
 
 -------------------------------------
 常見問題
@@ -350,9 +556,10 @@ Q：黑色視窗閃一下就消失？
 A：多半是缺少 OpenSSH 用戶端。開啟「設定 > 系統 >
    選用功能 > 新增選用功能」，安裝「OpenSSH 用戶端」。
 
-Q：資料夾裡的 connect.ps1 是什麼？
-A：實際執行連線的腳本，必須和 .bat 放在一起。
-   請不要刪除或單獨移動它。
+Q：資料夾裡的 connect.ps1 / connect.sh 是什麼？
+A：實際執行連線的腳本（Windows 用 .ps1，Mac 用 .sh），
+   必須和啟動檔放在同一個資料夾。
+   請不要刪除或單獨移動它們。
 
 Q：出現 Permission denied？
 A：把視窗拍照傳給管理者，可能是金鑰要重發。
@@ -399,7 +606,12 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         mode = 0o755 if os.path.splitext(f)[1] in EXEC or f == "cloudflared.exe" else 0o600
         info = zipfile.ZipInfo(f"{name}-claude/{f}", date_time=(2026, 1, 1, 0, 0, 0))
         info.compress_type = zipfile.ZIP_DEFLATED
-        info.external_attr = (mode & 0xFFFF) << 16
+        # S_IFREG (0o100000) must be OR'd in. Permission bits alone leave the
+        # file-type field zero, which extractors read as an unknown type and
+        # then normalise the mode away -- macOS Archive Utility drops the exec
+        # bit, and the .command fails with "you do not have appropriate access
+        # privileges". This is what ZipFile.write() stores via st_mode.
+        info.external_attr = ((0o100000 | mode) & 0xFFFF) << 16
         info.create_system = 3  # Unix, so the mode bits are honoured
         with open(src, "rb") as fh:
             z.writestr(info, fh.read())
@@ -408,7 +620,9 @@ chmod 600 "$ZIP"
 
 echo
 echo "Client package: $ZIP  ($(du -h "$ZIP" | cut -f1))"
-echo "  contents : 連線Claude.bat / VSCode開啟.bat / connect.ps1 / claude-連線.command / id_ed25519 / 請先讀我.txt"
+echo "  contents : Windows 連線Claude.bat / VSCode開啟.bat / connect.ps1"
+echo "             macOS   claude-連線.command / VSCode開啟.command / connect.sh"
+echo "             共用    id_ed25519 / 請先讀我.txt"
 echo "  host     : $SSH_HOST  (user $NAME)"
 [ "$BUNDLE" = "--bundle" ] && echo "  cloudflared: bundled" || echo "  cloudflared: downloads on first launch"
 echo
