@@ -819,7 +819,7 @@ Fable 在整套系統裡是最高階的模型 —— 限制規則、點數權重
 | `start-all.sh` | 重啟後把伺服器、Cloudflare tunnel、sshd、瀏覽器終端機一起拉起來 |
 | `web-terminal.sh` | 瀏覽器終端機的 start / stop / status |
 | `tunnel-named.sh`、`tunnel-quick.sh` | Cloudflare tunnel 輔助腳本 |
-| `make-client.sh` | 建立某個人的連線包 |
+| `make-client.sh` | 建立某個人的連線套件 |
 
 真實主機名稱刻意**不放在這個倉庫裡**。所有腳本都從 `/etc/claude-code/site.env`
 讀取,那個檔案位於工作目錄之外;參見
@@ -1236,7 +1236,7 @@ claude-code-limiter/
 │   │           └── js/app.js
 │   └── dashboard/                ← React/Vite 原始碼,目前沒有被服務
 ├── web-terminal/server.js        ← 驗證 Access 的 ttyd proxy
-├── make-client.sh                ← 建立某個人的連線包
+├── make-client.sh                ← 建立某個人的連線套件
 ├── provision-user.sh             ← 為共用主機模式建立 OS 帳號
 ├── sync-credentials.sh           ← 把憑證推給所有帳號
 ├── start-all.sh                  ← 伺服器 + tunnel + sshd + 瀏覽器終端機
@@ -1268,7 +1268,7 @@ ADMIN_PASSWORD=secret npm run serve
 - `packages/cli/src/hook.js` 必須維持**零相依** —— 只用 Node.js 內建模組。
 - 伺服器是 Express + better-sqlite3 + ws。保持簡單。
 - 被服務的儀表板是原生 HTML/CSS/JS —— 沒有建置步驟,沒有框架。
-- **絕對不要 commit `dist/`** —— 連線包裡有私鑰。
+- **絕對不要 commit `dist/`** —— 連線套件裡有私鑰。
 - **絕對不要 commit 真實主機名稱** —— 它們該放在 `/etc/claude-code/site.env`。
 
 ---
@@ -1285,7 +1285,7 @@ ADMIN_PASSWORD=secret npm run serve
 repo中 —— `git log` 可以清楚看出哪些工作是誰做的。
 
 本 fork 加入了共用主機部署、以 transcript 為基礎的 token 計量、訂閱上限監控、
-Fable 支援、連線包,以及瀏覽器終端機。本專案獨立維護,與上游專案並無隸屬關係;
+Fable 支援、連線套件,以及瀏覽器終端機。本專案獨立維護,與上游專案並無隸屬關係;
 請不要把源自這裡的問題送給上游的維護者。
 
 要追蹤上游:

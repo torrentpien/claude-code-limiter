@@ -461,7 +461,7 @@ chmod +x "$STAGE/VSCode開啟.command"
 # BOM so Notepad on Traditional Chinese Windows doesn't read this as Big5.
 printf '\xEF\xBB\xBF' > "$STAGE/請先讀我.txt"
 cat >> "$STAGE/請先讀我.txt" <<TXT
-Claude 連線包 — $NAME
+Claude 連線套件 — $NAME
 =====================================
 
 【Windows】

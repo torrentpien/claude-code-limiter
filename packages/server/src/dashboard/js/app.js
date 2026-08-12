@@ -826,7 +826,7 @@
         html += '<div class="breadcrumb"><a href="#overview">Overview</a> / <span>' + escapeHtml(user.name) + '</span></div>';
         html += '<div class="page-header"><h2>' + escapeHtml(user.name) + '</h2>';
         html += '<div class="page-header-actions">';
-        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線包</button>';
+        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線套件</button>';
         html += '<button class="btn btn-sm" data-action="edit-limits" data-user-id="' + user.id + '">Edit Limits</button>';
         html += '<button class="btn btn-sm btn-danger" data-action="delete-user" data-user-id="' + user.id + '" data-user-name="' + escapeHtml(user.name) + '">Delete User</button>';
         html += '</div></div>';
@@ -865,14 +865,14 @@
         html += '<div>';
 
         // Connection package — everything this person needs, in one file.
-        html += '<div class="card mb-2"><div class="card-header"><h3>連線包</h3></div>';
+        html += '<div class="card mb-2"><div class="card-header"><h3>連線套件</h3></div>';
         html += '<div class="card-body">';
-        html += '<p class="text-muted text-sm mb-2">給 <strong>' + escapeHtml(user.name) + '</strong> 的專屬一鍵包。'
+        html += '<p class="text-muted text-sm mb-2">給 <strong>' + escapeHtml(user.name) + '</strong> 的專屬一鍵套件。'
              +  '對方解壓縮後雙擊「連線Claude.bat」即可使用,不需安裝任何東西、不需登入 Claude。'
              +  '首次下載會自動幫他建立帳號。</p>';
         html += '<p class="text-muted text-sm mb-2">SSH 帳號:<code>' + escapeHtml(user.slug) + '</code></p>';
         html += '<div class="mb-2">';
-        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線包</button> ';
+        html += '<button class="btn btn-sm btn-primary" data-action="download-package" data-user-id="' + user.id + '" data-user-slug="' + escapeHtml(user.slug) + '">下載連線套件</button> ';
         html += '<button class="btn btn-sm btn-warning" data-action="rotate-package" data-user-id="' + user.id + '" data-user-name="' + escapeHtml(user.name) + '">重新產生(換金鑰)</button>';
         html += '</div>';
         html += '<p class="text-muted text-sm">⚠ 檔案內含私人金鑰,等同這個人的密碼——請用私訊管道傳送,不要放公開群組。'
@@ -1513,7 +1513,7 @@
         document.body.removeChild(a);
         // Revoke late: Safari cancels the download if the URL dies too soon.
         setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
-        showToast('連線包已下載', '請用私訊管道傳給對方,檔案內含私鑰。', 'success');
+        showToast('連線套件已下載', '請用私訊管道傳給對方,檔案內含私鑰。', 'success');
       })
       .catch(function (err) {
         showToast('產生失敗', err.message, 'error');
@@ -1525,7 +1525,7 @@
 
   /** Issue a fresh key. Invalidates whatever the person already has. */
   function rotateClientPackage(userId, userName, btn) {
-    if (!confirm('要為 ' + (userName || '這位使用者') + ' 重新產生連線包嗎?\n\n'
+    if (!confirm('要為 ' + (userName || '這位使用者') + ' 重新產生連線套件嗎?\n\n'
                + '對方手上的舊檔案會立刻失效,必須重新傳一份新的給他。')) return;
 
     var label = btn ? btn.textContent : '';
@@ -1542,7 +1542,7 @@
         });
       })
       .then(function () {
-        showToast('已重新產生', '舊的連線包已失效,請下載新的並傳給對方。', 'success');
+        showToast('已重新產生', '舊的連線套件已失效,請下載新的並傳給對方。', 'success');
       })
       .catch(function (err) {
         showToast('產生失敗', err.message, 'error');
